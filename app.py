@@ -3,11 +3,10 @@ import yfinance as yf
 import pandas as pd
 from ddgs import DDGS
 from google import genai
-from google.genai import types
 
 
 # ============================================================
-# CẤU HÌNH GIAO DIỆN
+# CẤU HÌNH
 # ============================================================
 
 st.set_page_config(
@@ -16,20 +15,22 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛢️ Hệ thống AI Dự báo Giá Dầu")
+st.title("🛢️ AI Dự báo Giá Dầu WTI")
 st.markdown(
-    "Tự động thu thập tin tức toàn cầu, phân tích RSI + MACD "
-    "và dùng Gemini để tổng hợp xu hướng thị trường WTI."
+    "Phân tích giá dầu WTI bằng dữ liệu kỹ thuật RSI + MACD "
+    "kết hợp tin tức vĩ mô và Gemini AI."
 )
 
 # ============================================================
-# API KEY
+# SIDEBAR
 # ============================================================
+
+st.sidebar.header("⚙️ Cấu hình")
 
 api_key = st.sidebar.text_input(
     "🔑 Gemini API Key",
     type="password",
-    help="Lấy API Key tại https://aistudio.google.com/"
+    placeholder="Dán Gemini API Key vào đây"
 )
 
 st.sidebar.markdown(
@@ -38,22 +39,28 @@ st.sidebar.markdown(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.caption(
-    "⚠️ Đây là công cụ tham khảo, không phải lời khuyên đầu tư."
+
+st.sidebar.info(
+    "Công cụ chỉ mang tính chất tham khảo, "
+    "không phải lời khuyên đầu tư."
 )
 
 
 # ============================================================
-# LẤY DỮ LIỆU GIÁ + RSI + MACD
+# LẤY DỮ LIỆU GIÁ
 # ============================================================
 
-def get_technical_data(ticker="CL=F", days=90):
+def get_technical_data(
+    ticker="CL=F",
+    days=90
+):
     """
-    Lấy giá WTI từ Yahoo Finance.
-    Tính RSI 14 và MACD 12/26/9.
+    Lấy dữ liệu WTI từ Yahoo Finance
+    và tính RSI + MACD.
     """
 
     try:
+
         data = yf.download(
             ticker,
             period=f"{days}d",
@@ -63,32 +70,60 @@ def get_technical_data(ticker="CL=F", days=90):
         )
 
         if data is None or data.empty:
-            return None, "Không lấy được dữ liệu giá WTI từ Yahoo Finance."
+            return None, "Không lấy được dữ liệu WTI từ Yahoo Finance."
 
+        # ----------------------------------------------------
         # Xử lý MultiIndex của yfinance
-        if isinstance(data.columns, pd.MultiIndex):
-            try:
-                data = data.xs(ticker, axis=1, level=-1)
-            except Exception:
-                data.columns = data.columns.get_level_values(0)
+        # ----------------------------------------------------
 
-        data.columns = [str(c) for c in data.columns]
+        if isinstance(data.columns, pd.MultiIndex):
+
+            try:
+
+                data = data.xs(
+                    ticker,
+                    axis=1,
+                    level=-1
+                )
+
+            except Exception:
+
+                data.columns = (
+                    data.columns
+                    .get_level_values(0)
+                )
+
+        data.columns = [
+            str(column)
+            for column in data.columns
+        ]
+
+        # ----------------------------------------------------
+        # Kiểm tra Close
+        # ----------------------------------------------------
 
         if "Close" not in data.columns:
-            return None, "Dữ liệu Yahoo Finance không có cột Close."
 
-        # Chuyển Close thành dữ liệu số
-        close = pd.to_numeric(
+            return (
+                None,
+                "Dữ liệu Yahoo Finance không có cột Close."
+            )
+
+        data["Close"] = pd.to_numeric(
             data["Close"],
             errors="coerce"
         )
 
-        data = data.copy()
-        data["Close"] = close
-        data = data.dropna(subset=["Close"])
+        data = data.dropna(
+            subset=["Close"]
+        )
 
         if len(data) < 35:
-            return None, "Không đủ dữ liệu để tính RSI/MACD."
+
+            return (
+                None,
+                "Không đủ dữ liệu để tính RSI và MACD."
+            )
 
         # ====================================================
         # RSI 14
@@ -96,8 +131,13 @@ def get_technical_data(ticker="CL=F", days=90):
 
         delta = data["Close"].diff()
 
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
+        gain = delta.clip(
+            lower=0
+        )
+
+        loss = -delta.clip(
+            upper=0
+        )
 
         avg_gain = gain.rolling(
             window=14,
@@ -109,9 +149,22 @@ def get_technical_data(ticker="CL=F", days=90):
             min_periods=14
         ).mean()
 
-        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        # Tránh chia cho 0
+        avg_loss = avg_loss.replace(
+            0,
+            pd.NA
+        )
 
-        data["RSI"] = 100 - (100 / (1 + rs))
+        rs = avg_gain / avg_loss
+
+        data["RSI"] = (
+            100 -
+            (
+                100 /
+                (1 + rs)
+            )
+        )
+
         data["RSI"] = data["RSI"].fillna(50)
 
         # ====================================================
@@ -128,24 +181,43 @@ def get_technical_data(ticker="CL=F", days=90):
             adjust=False
         ).mean()
 
-        data["MACD"] = ema12 - ema26
+        data["MACD"] = (
+            ema12 -
+            ema26
+        )
 
-        data["Signal"] = data["MACD"].ewm(
-            span=9,
-            adjust=False
-        ).mean()
+        data["Signal"] = (
+            data["MACD"]
+            .ewm(
+                span=9,
+                adjust=False
+            )
+            .mean()
+        )
 
         data = data.dropna(
-            subset=["RSI", "MACD", "Signal"]
+            subset=[
+                "RSI",
+                "MACD",
+                "Signal"
+            ]
         )
 
         if data.empty:
-            return None, "Không đủ dữ liệu sau khi tính RSI/MACD."
+
+            return (
+                None,
+                "Không đủ dữ liệu sau khi tính RSI/MACD."
+            )
 
         return data.tail(30), None
 
     except Exception as e:
-        return None, f"Lỗi khi tải dữ liệu thị trường: {str(e)}"
+
+        return (
+            None,
+            f"Lỗi khi lấy dữ liệu thị trường: {e}"
+        )
 
 
 # ============================================================
@@ -157,41 +229,72 @@ def get_global_news(
     max_results=15
 ):
     """
-    Lấy tin tức mới nhất thông qua DuckDuckGo.
+    Thu thập tin tức dầu mỏ mới nhất.
     """
 
     try:
+
         news = []
 
         with DDGS() as ddgs:
+
             results = ddgs.news(
                 query=query,
                 max_results=max_results
             )
 
             for item in results:
-                title = item.get("title")
+
+                title = item.get(
+                    "title"
+                )
 
                 if title:
-                    news.append(title.strip())
+
+                    news.append(
+                        title.strip()
+                    )
 
         if not news:
+
             return [
-                "Không tìm thấy tin tức mới. "
-                "Hãy thận trọng khi đánh giá yếu tố vĩ mô."
+                "Không tìm thấy tin tức mới."
             ]
 
         return news
 
     except Exception as e:
+
         return [
-            "Không thể lấy tin tức từ DuckDuckGo tại thời điểm này.",
-            f"Chi tiết kỹ thuật: {str(e)}"
+            "Không thể lấy tin tức tại thời điểm này.",
+            f"Lỗi nguồn tin: {e}"
         ]
 
 
 # ============================================================
-# GEMINI AI
+# CHUYỂN GIÁ TRỊ THÀNH FLOAT
+# ============================================================
+
+def safe_float(value):
+
+    try:
+
+        if hasattr(
+            value,
+            "item"
+        ):
+
+            value = value.item()
+
+        return float(value)
+
+    except Exception:
+
+        return float("nan")
+
+
+# ============================================================
+# GEMINI INTERACTIONS API
 # ============================================================
 
 def ai_analyze_market(
@@ -203,50 +306,95 @@ def ai_analyze_market(
     api_key
 ):
     """
-    Gửi dữ liệu sang Gemini để phân tích.
+    Phân tích thị trường bằng Gemini 3.6 Flash
+    thông qua Interactions API.
     """
 
     try:
+
+        # ----------------------------------------------------
+        # Tạo Gemini Client
+        # ----------------------------------------------------
+
         client = genai.Client(
             api_key=api_key
         )
 
+        # ----------------------------------------------------
+        # Tin tức
+        # ----------------------------------------------------
+
         news_text = "\n".join(
-            [f"- {news}" for news in news_list]
+            [
+                f"- {news}"
+                for news in news_list
+            ]
         )
 
-        # Trạng thái RSI
-        if rsi >= 70:
-            rsi_status = "Quá mua"
-        elif rsi <= 30:
-            rsi_status = "Quá bán"
-        else:
-            rsi_status = "Trung tính"
+        # ----------------------------------------------------
+        # RSI
+        # ----------------------------------------------------
 
-        # Trạng thái MACD
-        if macd > signal:
-            macd_status = (
-                "MACD nằm trên đường Signal, "
-                "thiên về tăng"
+        if rsi >= 70:
+
+            rsi_status = (
+                "QUÁ MUA - thị trường có thể đang tăng nóng"
             )
+
+        elif rsi <= 30:
+
+            rsi_status = (
+                "QUÁ BÁN - thị trường có thể đang giảm mạnh"
+            )
+
         else:
-            macd_status = (
-                "MACD nằm dưới đường Signal, "
-                "thiên về giảm"
+
+            rsi_status = (
+                "TRUNG TÍNH"
             )
+
+        # ----------------------------------------------------
+        # MACD
+        # ----------------------------------------------------
+
+        if macd > signal:
+
+            macd_status = (
+                "TÍCH CỰC - MACD nằm trên Signal"
+            )
+
+        elif macd < signal:
+
+            macd_status = (
+                "TIÊU CỰC - MACD nằm dưới Signal"
+            )
+
+        else:
+
+            macd_status = (
+                "TRUNG TÍNH"
+            )
+
+        # ----------------------------------------------------
+        # Prompt
+        # ----------------------------------------------------
 
         prompt = f"""
 Bạn là chuyên gia phân tích thị trường dầu thô WTI.
 
-Hãy phân tích dữ liệu dưới đây một cách ngắn gọn,
-dễ hiểu và có tính thực tế.
+Hãy phân tích dữ liệu hiện tại và đưa ra nhận định
+ngắn gọn, rõ ràng bằng tiếng Việt.
 
-=============================
-DỮ LIỆU THỊ TRƯỜNG
-=============================
+==================================================
+DỮ LIỆU GIÁ
+==================================================
 
 Giá WTI hiện tại:
 ${last_price:.2f}
+
+==================================================
+CHỈ BÁO KỸ THUẬT
+==================================================
 
 RSI(14):
 {rsi:.2f}
@@ -263,86 +411,153 @@ Signal:
 Trạng thái MACD:
 {macd_status}
 
-=============================
+==================================================
 TIN TỨC VĨ MÔ
-=============================
+==================================================
 
 {news_text}
 
-=============================
+==================================================
 YÊU CẦU
-=============================
+==================================================
 
-Hãy trả lời bằng tiếng Việt.
+Phân tích các yếu tố:
 
-Không cần giải thích quá dài.
+1. Xu hướng giá hiện tại.
+2. Cung và cầu dầu.
+3. OPEC.
+4. Tồn kho dầu Mỹ nếu có.
+5. Địa chính trị.
+6. Nhu cầu dầu toàn cầu.
+7. RSI.
+8. MACD.
+9. Rủi ro thị trường.
 
-Sử dụng đúng cấu trúc:
+Trả lời đúng cấu trúc sau:
 
 🎯 XU HƯỚNG DỰ KIẾN
+
 Tăng / Giảm / Đi ngang
 
+Giải thích ngắn gọn.
+
 📰 TÁC ĐỘNG VĨ MÔ
-Tóm tắt các yếu tố cung/cầu, OPEC,
-tồn kho, địa chính trị và nhu cầu dầu.
+
+Nêu các yếu tố tích cực và tiêu cực
+ảnh hưởng đến giá dầu.
 
 📊 TÍN HIỆU KỸ THUẬT
-Nhận xét RSI + MACD.
+
+Phân tích RSI + MACD.
 
 💡 CHIẾN LƯỢC THAM KHẢO
-Nêu vùng cần quan sát và rủi ro.
+
+Nêu vùng cần quan sát,
+điều kiện có thể cân nhắc mua,
+điều kiện có thể cân nhắc bán.
 
 ⚠️ RỦI RO
-Nêu các yếu tố có thể khiến dự báo sai.
 
-Không khẳng định chắc chắn giá sẽ tăng hoặc giảm.
+Nêu các yếu tố có thể làm dự báo sai.
+
+Không được khẳng định chắc chắn giá sẽ tăng
+hoặc giảm.
+
+Đây chỉ là phân tích tham khảo,
+không phải lời khuyên đầu tư.
 """
 
-        # Model Gemini
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1200
-            )
+        # ----------------------------------------------------
+        # GỌI GEMINI INTERACTIONS API
+        # ----------------------------------------------------
+
+        interaction = client.interactions.create(
+            model="gemini-3.6-flash",
+            input=prompt,
+            generation_config={
+                "thinking_level": "low"
+            }
         )
 
-        if not response or not response.text:
-            return "Gemini không trả về nội dung phân tích."
+        # ----------------------------------------------------
+        # KẾT QUẢ
+        # ----------------------------------------------------
 
-        return response.text
+        if not interaction:
+
+            return (
+                "Gemini không trả về dữ liệu."
+            )
+
+        if hasattr(
+            interaction,
+            "output_text"
+        ):
+
+            if interaction.output_text:
+
+                return (
+                    interaction.output_text
+                )
+
+        # ----------------------------------------------------
+        # Fallback
+        # ----------------------------------------------------
+
+        if hasattr(
+            interaction,
+            "steps"
+        ):
+
+            for step in reversed(
+                interaction.steps
+            ):
+
+                if not hasattr(
+                    step,
+                    "content"
+                ):
+
+                    continue
+
+                content = step.content
+
+                if isinstance(
+                    content,
+                    list
+                ):
+
+                    for item in content:
+
+                        if (
+                            hasattr(
+                                item,
+                                "text"
+                            )
+                            and item.text
+                        ):
+
+                            return item.text
+
+        return (
+            "Gemini đã xử lý nhưng không "
+            "trả về nội dung văn bản."
+        )
 
     except Exception as e:
+
+        error_text = str(e)
+
         return (
             "❌ Không thể kết nối Gemini.\n\n"
-            f"Chi tiết lỗi: {str(e)}\n\n"
-            "Hãy kiểm tra:\n"
-            "1. Gemini API Key có đúng không.\n"
-            "2. API Key còn hoạt động không.\n"
-            "3. API Gemini đã được bật cho key chưa.\n"
-            "4. Kiểm tra quota của API."
+            f"Chi tiết lỗi:\n{error_text}\n\n"
+            "Hãy kiểm tra Gemini API Key "
+            "và phiên bản google-genai."
         )
 
 
 # ============================================================
-# CHUYỂN GIÁ TRỊ VỀ FLOAT
-# ============================================================
-
-def safe_float(value):
-
-    try:
-        if hasattr(value, "item"):
-            value = value.item()
-
-        return float(value)
-
-    except Exception:
-        return float("nan")
-
-
-# ============================================================
-# LUỒNG CHÍNH
+# CHƯƠNG TRÌNH CHÍNH
 # ============================================================
 
 if st.button(
@@ -352,31 +567,50 @@ if st.button(
 ):
 
     # ========================================================
-    # KIỂM TRA API KEY
+    # KIỂM TRA KEY
     # ========================================================
 
-    if not api_key or not api_key.strip():
+    if not api_key:
 
         st.error(
-            "⚠️ Bạn chưa nhập Gemini API Key ở menu bên trái."
+            "⚠️ Bạn chưa nhập Gemini API Key."
+        )
+
+        st.stop()
+
+    api_key = api_key.strip()
+
+    if not api_key:
+
+        st.error(
+            "⚠️ Gemini API Key không được để trống."
         )
 
         st.stop()
 
     # ========================================================
-    # BƯỚC 1: DỮ LIỆU KỸ THUẬT
+    # BƯỚC 1
     # ========================================================
 
     with st.spinner(
-        "1/3: Đang tải dữ liệu giá WTI và tính RSI/MACD..."
+        "1/3: Đang tải dữ liệu WTI và tính RSI/MACD..."
     ):
 
-        df, error_message = get_technical_data()
+        df, error_message = (
+            get_technical_data()
+        )
 
     if df is None:
 
-        st.error(error_message)
+        st.error(
+            error_message
+        )
+
         st.stop()
+
+    # ========================================================
+    # LẤY GIÁ TRỊ CUỐI
+    # ========================================================
 
     try:
 
@@ -396,18 +630,20 @@ if st.button(
             df["Signal"].iloc[-1]
         )
 
+        values = [
+            last_price,
+            last_rsi,
+            last_macd,
+            last_signal
+        ]
+
         if any(
-            pd.isna(x)
-            for x in [
-                last_price,
-                last_rsi,
-                last_macd,
-                last_signal
-            ]
+            pd.isna(value)
+            for value in values
         ):
 
             st.error(
-                "Dữ liệu kỹ thuật bị thiếu hoặc không hợp lệ."
+                "❌ Dữ liệu kỹ thuật không hợp lệ."
             )
 
             st.stop()
@@ -415,28 +651,32 @@ if st.button(
     except Exception as e:
 
         st.error(
-            f"Không thể đọc dữ liệu kỹ thuật: {str(e)}"
+            f"❌ Không đọc được dữ liệu kỹ thuật: {e}"
         )
 
         st.stop()
 
     # ========================================================
-    # BƯỚC 2: TIN TỨC
+    # BƯỚC 2
     # ========================================================
 
     with st.spinner(
-        "2/3: Đang quét tin tức dầu mỏ và địa chính trị..."
+        "2/3: Đang quét tin tức dầu mỏ toàn cầu..."
     ):
 
         news = get_global_news()
 
     # ========================================================
-    # HIỂN THỊ THÔNG SỐ
+    # HIỂN THỊ THỊ TRƯỜNG
     # ========================================================
 
-    st.subheader("📊 Trạng thái thị trường")
+    st.subheader(
+        "📊 Trạng thái thị trường"
+    )
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
 
     col1.metric(
         "Giá WTI",
@@ -448,6 +688,7 @@ if st.button(
         f"{last_rsi:.2f}"
     )
 
+    # RSI status
     if last_rsi >= 70:
 
         rsi_label = "🔴 Quá mua"
@@ -465,26 +706,35 @@ if st.button(
         rsi_label
     )
 
+    # MACD
     if last_macd > last_signal:
 
-        macd_status = "🟢 MACD tích cực"
+        macd_label = "🟢 Tăng"
+
+    elif last_macd < last_signal:
+
+        macd_label = "🔴 Giảm"
 
     else:
 
-        macd_status = "🔴 MACD tiêu cực"
+        macd_label = "🟡 Trung tính"
 
     col4.metric(
         "MACD",
-        macd_status
+        macd_label
     )
 
     # ========================================================
     # BIỂU ĐỒ
     # ========================================================
 
-    st.subheader("📈 Biểu đồ WTI")
+    st.subheader(
+        "📈 Biểu đồ giá WTI"
+    )
 
-    chart_data = df[["Close"]].copy()
+    chart_data = df[
+        ["Close"]
+    ].copy()
 
     st.line_chart(
         chart_data,
@@ -492,38 +742,44 @@ if st.button(
     )
 
     # ========================================================
-    # BƯỚC 3: AI
+    # BƯỚC 3: GEMINI
     # ========================================================
 
     with st.spinner(
-        "3/3: Gemini đang phân tích dữ liệu thị trường..."
+        "3/3: Gemini đang phân tích thị trường..."
     ):
 
         analysis = ai_analyze_market(
-            news,
-            last_price,
-            last_rsi,
-            last_macd,
-            last_signal,
-            api_key.strip()
+            news_list=news,
+            last_price=last_price,
+            rsi=last_rsi,
+            macd=last_macd,
+            signal=last_signal,
+            api_key=api_key
         )
 
     # ========================================================
-    # KẾT QUẢ AI
+    # HIỂN THỊ KẾT QUẢ AI
     # ========================================================
 
-    st.subheader("🤖 Báo cáo phân tích của AI")
+    st.subheader(
+        "🤖 Báo cáo phân tích của AI"
+    )
 
-    st.markdown(analysis)
+    st.markdown(
+        analysis
+    )
 
     # ========================================================
     # TIN TỨC
     # ========================================================
 
-    st.subheader("📰 Dữ liệu tin tức đầu vào")
+    st.subheader(
+        "📰 Tin tức đầu vào"
+    )
 
     with st.expander(
-        "Xem các bản tin đã thu thập"
+        "Xem các tin tức đã thu thập"
     ):
 
         if news:
@@ -544,11 +800,13 @@ if st.button(
             )
 
     # ========================================================
-    # FOOTER
+    # THÔNG TIN
     # ========================================================
 
+    st.markdown("---")
+
     st.caption(
-        "Nguồn giá: Yahoo Finance / WTI Futures (CL=F). "
-        "Nguồn tin: DuckDuckGo News. "
-        "Phân tích AI: Google Gemini."
+        "Giá: Yahoo Finance / WTI Futures (CL=F) | "
+        "Tin tức: DuckDuckGo News | "
+        "AI: Google Gemini Interactions API"
     )
