@@ -16,49 +16,57 @@ from google import genai
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Phân tích CLUSDT Binance",
+    page_title="AI Phân tích Dầu CLUSDT",
     page_icon="🛢️",
     layout="wide",
 )
 
 SYMBOL = "CLUSDT"
 
-# Binance Futures REST có thể bị chặn trên Streamlit Cloud.
-BINANCE_FAPI = "https://fapi.binance.com"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+COINGECKO_PRO_BASE = "https://pro-api.coingecko.com/api/v3"
 
-# Binance public data archive.
 BINANCE_DATA_BASE = "https://data.binance.vision"
 
-# Số ngày tối đa app thử tải từ archive.
-MAX_ARCHIVE_DAYS = 14
-
-
-# ============================================================
-# GIAO DIỆN
-# ============================================================
-
-st.title("🛢️ AI Phân tích Dầu WTI — Binance CLUSDT")
-
+st.title("🛢️ AI Phân tích Giá Dầu CLUSDT")
 st.markdown(
     """
-    Phân tích **CLUSDT (WTI Crude Oil)** bằng dữ liệu Binance,
-    biểu đồ nến, RSI, MACD, EMA, Volume, Funding Rate,
-    Open Interest, tin tức và Gemini AI.
+    Phân tích WTI trên Binance Futures bằng:
+    **CoinGecko → giá/Funding/Open Interest/Volume**
+    + **Binance Public Data → nến lịch sử**
+    + **RSI / MACD / EMA**
+    + **Tin tức + Gemini AI**
     """
 )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 st.sidebar.header("⚙️ Cấu hình")
 
-api_key = st.sidebar.text_input(
+gemini_api_key = st.sidebar.text_input(
     "🔑 Gemini API Key",
     type="password",
-    placeholder="Dán Gemini API Key vào đây",
+    placeholder="Dán Gemini API Key",
+)
+
+coingecko_api_key = st.sidebar.text_input(
+    "🦎 CoinGecko API Key",
+    type="password",
+    placeholder="Có thể để trống nếu endpoint public hoạt động",
 )
 
 st.sidebar.markdown(
-    "[👉 Lấy Gemini API Key]"
-    "(https://aistudio.google.com/apikey)"
+    "[👉 CoinGecko API](https://www.coingecko.com/api)"
 )
+
+st.sidebar.markdown(
+    "[👉 Gemini API](https://aistudio.google.com/apikey)"
+)
+
+st.sidebar.markdown("---")
 
 interval = st.sidebar.selectbox(
     "⏱️ Khung thời gian",
@@ -76,15 +84,18 @@ st.sidebar.markdown("---")
 
 st.sidebar.info(
     """
-    **Hợp đồng:** CLUSDT  
-    **Tài sản:** WTI Crude Oil  
-    **Sàn:** Binance Futures
+    Symbol: **CLUSDT**
+    
+    Binance Futures:
+    **WTI Crude Oil**
+    
+    CoinGecko:
+    dữ liệu Futures trung gian.
     """
 )
 
 st.sidebar.caption(
-    "⚠️ Đây là công cụ phân tích tham khảo, "
-    "không phải lời khuyên đầu tư."
+    "⚠️ Chỉ dùng để tham khảo, không phải lời khuyên đầu tư."
 )
 
 
@@ -93,7 +104,7 @@ st.sidebar.caption(
 # ============================================================
 
 @st.cache_resource
-def create_session():
+def get_session():
     session = requests.Session()
 
     session.headers.update(
@@ -103,164 +114,250 @@ def create_session():
                 "(Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 "
                 "(KHTML, like Gecko) "
-                "Chrome/140.0 Safari/537.36"
+                "Chrome/140 Safari/537.36"
             ),
-            "Accept": "*/*",
+            "Accept": "application/json",
         }
     )
 
     return session
 
 
-SESSION = create_session()
+SESSION = get_session()
 
 
 # ============================================================
-# CHUYỂN INTERVAL -> MILLISECONDS
+# COINGECKO REQUEST
 # ============================================================
 
-def interval_to_ms(interval_name):
-    mapping = {
-        "5m": 5 * 60 * 1000,
-        "15m": 15 * 60 * 1000,
-        "30m": 30 * 60 * 1000,
-        "1h": 60 * 60 * 1000,
-        "4h": 4 * 60 * 60 * 1000,
-        "1d": 24 * 60 * 60 * 1000,
-    }
-
-    return mapping[interval_name]
-
-
-# ============================================================
-# BINANCE REST
-# ============================================================
-
-def get_binance_rest_klines(
-    symbol,
-    interval_name,
-    limit_count,
+def coingecko_get(
+    path,
+    params=None,
 ):
     """
-    Thử Binance Futures REST.
-    Nếu Cloud bị 451 sẽ trả lỗi để chuyển sang archive.
+    Ưu tiên Pro API nếu có API key.
+    Nếu không có, thử public API.
     """
 
+    headers = {}
+
+    if coingecko_api_key.strip():
+        base_url = COINGECKO_PRO_BASE
+        headers["x-cg-pro-api-key"] = (
+            coingecko_api_key.strip()
+        )
+    else:
+        base_url = COINGECKO_BASE
+
     try:
+
         response = SESSION.get(
-            f"{BINANCE_FAPI}/fapi/v1/klines",
-            params={
-                "symbol": symbol,
-                "interval": interval_name,
-                "limit": limit_count,
-            },
-            timeout=15,
+            base_url + path,
+            params=params or {},
+            headers=headers,
+            timeout=20,
         )
 
-        if response.status_code != 200:
-            return None, (
-                f"HTTP {response.status_code}: "
-                f"{response.text[:300]}"
-            )
+        if response.status_code == 200:
+            return response.json(), None
 
-        data = response.json()
-
-        if not data:
-            return None, "Binance REST trả dữ liệu rỗng."
-
-        columns = [
-            "open_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "close_time",
-            "quote_volume",
-            "trades",
-            "taker_buy_base",
-            "taker_buy_quote",
-            "ignore",
-        ]
-
-        df = pd.DataFrame(
-            data,
-            columns=columns,
+        return None, (
+            f"CoinGecko HTTP {response.status_code}: "
+            f"{response.text[:500]}"
         )
-
-        return clean_klines(df), None
 
     except Exception as exc:
-        return None, str(exc)
+
+        return None, (
+            f"Lỗi CoinGecko: {exc}"
+        )
 
 
 # ============================================================
-# CLEAN KLINES
+# TÌM CLUSDT TRÊN BINANCE FUTURES COINGECKO
 # ============================================================
 
-def clean_klines(df):
-    df = df.copy()
+def get_clusdt_from_coingecko():
+    """
+    Lấy dữ liệu derivatives của CLUSDT.
 
-    numeric_cols = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "quote_volume",
-        "trades",
-        "taker_buy_base",
-        "taker_buy_quote",
-    ]
+    CoinGecko trả:
+    - price
+    - index
+    - basis
+    - funding_rate
+    - open_interest
+    - volume_24h
+    - last_traded_at
+    """
 
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce",
-            )
+    # Cách 1: derivatives/exchanges/binance_futures
+    data, error = coingecko_get(
+        "/derivatives/exchanges/binance_futures",
+        {
+            "include_tickers": "all",
+        },
+    )
 
-    if "open_time" in df.columns:
-        if not pd.api.types.is_datetime64_any_dtype(
-            df["open_time"]
+    if data is not None:
+
+        tickers = data.get(
+            "tickers",
+            [],
+        )
+
+        for ticker in tickers:
+
+            symbol = str(
+                ticker.get("symbol", "")
+            ).upper()
+
+            if symbol == SYMBOL:
+
+                return {
+                    "symbol": symbol,
+                    "market": "Binance (Futures)",
+                    "price": safe_number(
+                        ticker.get("last")
+                    ),
+                    "index": safe_number(
+                        ticker.get("index")
+                    ),
+                    "basis": safe_number(
+                        ticker.get(
+                            "index_basis_percentage"
+                        )
+                    ),
+                    "funding_rate": safe_number(
+                        ticker.get("funding_rate")
+                    ),
+                    "open_interest": safe_number(
+                        ticker.get(
+                            "open_interest_usd"
+                        )
+                    ),
+                    "volume_24h": safe_number(
+                        ticker.get(
+                            "h24_volume"
+                        )
+                    ),
+                    "last_traded": ticker.get(
+                        "last_traded"
+                    ),
+                    "trade_url": ticker.get(
+                        "trade_url"
+                    ),
+                }, None
+
+    # Cách 2: /derivatives
+    data2, error2 = coingecko_get(
+        "/derivatives",
+    )
+
+    if data2 is not None:
+
+        for ticker in data2:
+
+            if (
+                str(
+                    ticker.get("market", "")
+                ).lower()
+                .startswith("binance")
+            ):
+
+                symbol = str(
+                    ticker.get("symbol", "")
+                ).upper()
+
+                if symbol == SYMBOL:
+
+                    return {
+                        "symbol": symbol,
+                        "market": ticker.get(
+                            "market",
+                            "Binance (Futures)",
+                        ),
+                        "price": safe_number(
+                            ticker.get("price")
+                        ),
+                        "index": safe_number(
+                            ticker.get("index")
+                        ),
+                        "basis": safe_number(
+                            ticker.get("basis")
+                        ),
+                        "funding_rate": safe_number(
+                            ticker.get(
+                                "funding_rate"
+                            )
+                        ),
+                        "open_interest": safe_number(
+                            ticker.get(
+                                "open_interest"
+                            )
+                        ),
+                        "volume_24h": safe_number(
+                            ticker.get(
+                                "volume_24h"
+                            )
+                        ),
+                        "last_traded": ticker.get(
+                            "last_traded_at"
+                        ),
+                        "trade_url": None,
+                    }, None
+
+    return None, (
+        error
+        or error2
+        or "Không tìm thấy CLUSDT trên CoinGecko."
+    )
+
+
+# ============================================================
+# SAFE NUMBER
+# ============================================================
+
+def safe_number(value):
+    try:
+
+        if value is None:
+            return None
+
+        if isinstance(
+            value,
+            str,
         ):
-            df["open_time"] = pd.to_datetime(
-                df["open_time"],
-                unit="ms",
-                utc=True,
-                errors="coerce",
+            value = value.replace(
+                ",",
+                "",
             )
 
-    df = df.dropna(
-        subset=[
-            "open_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ]
-    )
+        number = float(value)
 
-    df = (
-        df.sort_values("open_time")
-        .drop_duplicates("open_time")
-        .reset_index(drop=True)
-    )
+        if pd.isna(number):
+            return None
 
-    return df
+        return number
+
+    except Exception:
+        return None
 
 
 # ============================================================
-# TẠO URL BINANCE DATA ARCHIVE
+# BINANCE PUBLIC DATA ARCHIVE
 # ============================================================
 
-def archive_url(
+def get_archive_url(
     symbol,
     interval_name,
     date_obj,
 ):
-    date_text = date_obj.strftime("%Y-%m-%d")
+    date_text = (
+        date_obj.strftime(
+            "%Y-%m-%d"
+        )
+    )
 
     return (
         f"{BINANCE_DATA_BASE}/data/futures/um/daily/"
@@ -270,7 +367,7 @@ def archive_url(
 
 
 # ============================================================
-# DOWNLOAD 1 NGÀY TỪ BINANCE ARCHIVE
+# TẢI 1 NGÀY NẾN
 # ============================================================
 
 def download_archive_day(
@@ -278,13 +375,15 @@ def download_archive_day(
     interval_name,
     date_obj,
 ):
-    url = archive_url(
+
+    url = get_archive_url(
         symbol,
         interval_name,
         date_obj,
     )
 
     try:
+
         response = SESSION.get(
             url,
             timeout=20,
@@ -299,29 +398,38 @@ def download_archive_day(
             return None, "File rỗng."
 
         with zipfile.ZipFile(
-            io.BytesIO(response.content)
-        ) as z:
+            io.BytesIO(
+                response.content
+            )
+        ) as archive:
 
             csv_files = [
-                name
-                for name in z.namelist()
-                if name.lower().endswith(".csv")
+                x
+                for x in archive.namelist()
+                if x.endswith(".csv")
             ]
 
             if not csv_files:
-                return None, "ZIP không có CSV."
+                return None, (
+                    "ZIP không chứa CSV."
+                )
 
-            with z.open(csv_files[0]) as csv_file:
+            with archive.open(
+                csv_files[0]
+            ) as csv_file:
 
-                raw = pd.read_csv(
+                data = pd.read_csv(
                     csv_file,
                     header=None,
                 )
 
-        if raw.empty:
+        if data.empty:
             return None, "CSV rỗng."
 
-        expected_cols = [
+        # Binance Kline CSV
+        data = data.iloc[:, :12]
+
+        data.columns = [
             "open_time",
             "open",
             "high",
@@ -336,80 +444,100 @@ def download_archive_day(
             "ignore",
         ]
 
-        # Một số archive có header.
-        first_value = str(raw.iloc[0, 0]).lower()
+        # Nếu archive có header
+        first_cell = str(
+            data.iloc[0, 0]
+        ).lower()
 
-        if first_value in (
-            "open_time",
-            "opentime",
-        ):
-            raw = raw.iloc[1:].reset_index(
-                drop=True
+        if "open_time" in first_cell:
+
+            data = data.iloc[1:].copy()
+
+        numeric_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+        ]
+
+        for col in numeric_cols:
+
+            data[col] = pd.to_numeric(
+                data[col],
+                errors="coerce",
             )
 
-        # Archive Binance có thể có đúng 12 cột.
-        if raw.shape[1] < 12:
-            return None, (
-                f"CSV có {raw.shape[1]} cột, "
-                "không đúng định dạng."
-            )
+        data["open_time"] = pd.to_datetime(
+            data["open_time"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
 
-        raw = raw.iloc[:, :12]
-        raw.columns = expected_cols
+        data = data.dropna(
+            subset=[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]
+        )
 
-        return clean_klines(raw), None
-
-    except zipfile.BadZipFile:
-        return None, "File tải về không phải ZIP hợp lệ."
+        return data, None
 
     except Exception as exc:
+
         return None, str(exc)
 
 
 # ============================================================
-# BINANCE PUBLIC DATA ARCHIVE
+# LẤY LỊCH SỬ NẾN
 # ============================================================
 
-def get_binance_archive_klines(
-    symbol,
+def get_binance_candles(
     interval_name,
     limit_count,
 ):
     """
-    Lấy dữ liệu Binance từ public data archive.
+    Không dùng fapi.binance.com.
 
-    Ưu điểm:
-    - Không phụ thuộc fapi.binance.com.
-    - Hữu ích khi Streamlit Cloud bị HTTP 451.
-
-    Với khung 4h, tải 1h rồi resample.
+    Lấy từ Binance Public Data Archive.
     """
 
     source_interval = interval_name
 
+    # 4h: lấy 1h rồi resample
     if interval_name == "4h":
         source_interval = "1h"
 
-    # Ước tính cần bao nhiêu ngày dữ liệu
     bars_per_day = {
         "5m": 288,
         "15m": 96,
         "30m": 48,
         "1h": 24,
-        "4h": 6,
         "1d": 1,
     }
 
-    per_day = bars_per_day[source_interval]
+    estimated_days = int(
+        limit_count /
+        bars_per_day[source_interval]
+    ) + 2
 
-    days_needed = max(
+    estimated_days = max(
         2,
-        int(limit_count / per_day) + 2,
+        estimated_days,
     )
 
-    days_needed = min(
-        days_needed,
-        MAX_ARCHIVE_DAYS,
+    estimated_days = min(
+        estimated_days,
+        14,
     )
 
     today = datetime.now(
@@ -417,42 +545,44 @@ def get_binance_archive_klines(
     ).date()
 
     frames = []
-    attempted = 0
-    successes = 0
 
-    # Lùi từ hôm nay về trước.
-    for offset in range(days_needed + 3):
+    for offset in range(
+        estimated_days + 3
+    ):
 
-        if len(frames) > 0:
-            current_bars = sum(
-                len(frame)
-                for frame in frames
+        date_obj = (
+            today -
+            timedelta(
+                days=offset
             )
-
-            if current_bars >= limit_count + 50:
-                break
-
-        date_obj = today - timedelta(
-            days=offset
         )
 
-        attempted += 1
-
-        day_df, error = download_archive_day(
-            symbol,
-            source_interval,
-            date_obj,
+        frame, error = (
+            download_archive_day(
+                SYMBOL,
+                source_interval,
+                date_obj,
+            )
         )
 
-        if day_df is not None:
+        if frame is not None:
+            frames.append(frame)
 
-            frames.append(day_df)
-            successes += 1
+        total_rows = sum(
+            len(x)
+            for x in frames
+        )
+
+        if total_rows >= (
+            limit_count + 50
+        ):
+            break
 
     if not frames:
+
         return None, (
-            "Không thể lấy dữ liệu từ Binance "
-            "Public Data Archive."
+            "Không thể lấy nến CLUSDT "
+            "từ Binance Public Data Archive."
         )
 
     df = pd.concat(
@@ -461,16 +591,24 @@ def get_binance_archive_klines(
     )
 
     df = (
-        df.sort_values("open_time")
-        .drop_duplicates("open_time")
-        .reset_index(drop=True)
+        df.sort_values(
+            "open_time"
+        )
+        .drop_duplicates(
+            "open_time"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
-    # Resample 1h -> 4h
+    # 4h
     if interval_name == "4h":
 
         df = (
-            df.set_index("open_time")
+            df.set_index(
+                "open_time"
+            )
             .resample("4h")
             .agg(
                 {
@@ -479,51 +617,40 @@ def get_binance_archive_klines(
                     "low": "min",
                     "close": "last",
                     "volume": "sum",
-                    "quote_volume": "sum",
-                    "trades": "sum",
-                    "taker_buy_base": "sum",
-                    "taker_buy_quote": "sum",
                 }
             )
-            .dropna(
-                subset=[
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                ]
-            )
+            .dropna()
             .reset_index()
         )
 
     df = df.tail(
         limit_count
-    ).reset_index(
-        drop=True
     )
 
-    if len(df) < 20:
+    if len(df) < 30:
+
         return None, (
-            "Binance Archive trả quá ít nến "
-            f"({len(df)} nến)."
+            f"Chỉ lấy được {len(df)} nến."
         )
 
-    return df, (
-        f"Binance Public Data Archive "
-        f"({successes}/{attempted} ngày)"
-    )
+    return df, None
 
 
 # ============================================================
-# TẠO DỮ LIỆU TECHNICAL
+# INDICATORS
 # ============================================================
 
-def add_indicators(df):
+def add_indicators(
+    df,
+):
 
     df = df.copy()
 
     # RSI
-    delta = df["close"].diff()
+    delta = (
+        df["close"]
+        .diff()
+    )
 
     gain = delta.clip(
         lower=0
@@ -534,12 +661,12 @@ def add_indicators(df):
     )
 
     avg_gain = gain.rolling(
-        window=14,
+        14,
         min_periods=14,
     ).mean()
 
     avg_loss = loss.rolling(
-        window=14,
+        14,
         min_periods=14,
     ).mean()
 
@@ -557,12 +684,15 @@ def add_indicators(df):
         100 -
         (
             100 /
-            (1 + rs)
+            (
+                1 + rs
+            )
         )
     )
 
-    df["rsi"] = df["rsi"].fillna(
-        50
+    df["rsi"] = (
+        df["rsi"]
+        .fillna(50)
     )
 
     # EMA
@@ -626,180 +756,11 @@ def add_indicators(df):
 
 
 # ============================================================
-# BINANCE FUNDING
-# ============================================================
-
-def get_funding_rate(
-    symbol
-):
-    try:
-
-        response = SESSION.get(
-            f"{BINANCE_FAPI}/fapi/v1/fundingRate",
-            params={
-                "symbol": symbol,
-                "limit": 1,
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-
-        if not data:
-            return None
-
-        return float(
-            data[-1]["fundingRate"]
-        )
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# BINANCE OPEN INTEREST
-# ============================================================
-
-def get_open_interest(
-    symbol
-):
-    try:
-
-        response = SESSION.get(
-            f"{BINANCE_FAPI}/fapi/v1/openInterest",
-            params={
-                "symbol": symbol,
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-
-        return float(
-            data["openInterest"]
-        )
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# BINANCE PRICE INDEX / MARK PRICE
-# ============================================================
-
-def get_binance_mark_price(
-    symbol
-):
-    try:
-
-        response = SESSION.get(
-            f"{BINANCE_FAPI}/fapi/v1/premiumIndex",
-            params={
-                "symbol": symbol,
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-
-        return {
-            "mark_price": float(
-                data["markPrice"]
-            ),
-            "index_price": float(
-                data["indexPrice"]
-            ),
-            "funding_rate": float(
-                data["lastFundingRate"]
-            ),
-        }
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# TIN TỨC
-# ============================================================
-
-def get_news(
-    max_results=15
-):
-
-    queries = [
-        "WTI crude oil",
-        "OPEC oil",
-        "oil inventory",
-        "oil geopolitics",
-        "WTI oil price",
-    ]
-
-    all_news = []
-
-    try:
-
-        with DDGS() as ddgs:
-
-            for query in queries:
-
-                try:
-
-                    results = ddgs.news(
-                        query=query,
-                        max_results=4,
-                    )
-
-                    for item in results:
-
-                        title = item.get(
-                            "title"
-                        )
-
-                        if title:
-                            all_news.append(
-                                title.strip()
-                            )
-
-                except Exception:
-                    continue
-
-        all_news = list(
-            dict.fromkeys(
-                all_news
-            )
-        )
-
-        if not all_news:
-            return [
-                "Không tìm thấy tin tức mới."
-            ]
-
-        return all_news[
-            :max_results
-        ]
-
-    except Exception as exc:
-
-        return [
-            f"Không thể lấy tin tức: {exc}"
-        ]
-
-
-# ============================================================
 # TECHNICAL SCORE
 # ============================================================
 
 def technical_analysis(
-    df
+    df,
 ):
 
     last = df.iloc[-1]
@@ -829,6 +790,7 @@ def technical_analysis(
     )
 
     score = 0
+
     reasons = []
 
     # RSI
@@ -949,16 +911,84 @@ def technical_analysis(
 
 
 # ============================================================
+# NEWS
+# ============================================================
+
+def get_news(
+    max_results=15,
+):
+
+    queries = [
+        "WTI crude oil",
+        "OPEC oil",
+        "oil inventory",
+        "oil geopolitics",
+        "WTI oil price",
+    ]
+
+    all_news = []
+
+    try:
+
+        with DDGS() as ddgs:
+
+            for query in queries:
+
+                try:
+
+                    results = ddgs.news(
+                        query=query,
+                        max_results=4,
+                    )
+
+                    for item in results:
+
+                        title = item.get(
+                            "title"
+                        )
+
+                        if title:
+
+                            all_news.append(
+                                title.strip()
+                            )
+
+                except Exception:
+                    continue
+
+        unique_news = list(
+            dict.fromkeys(
+                all_news
+            )
+        )
+
+        if not unique_news:
+
+            return [
+                "Không lấy được tin tức mới."
+            ]
+
+        return unique_news[
+            :max_results
+        ]
+
+    except Exception as exc:
+
+        return [
+            f"Không thể lấy tin tức: {exc}"
+        ]
+
+
+# ============================================================
 # GEMINI
 # ============================================================
 
 def analyze_with_gemini(
     api_key,
+    ticker,
     technical,
-    funding_rate,
-    open_interest,
+    futures,
     news,
-    data_source,
 ):
 
     try:
@@ -967,43 +997,83 @@ def analyze_with_gemini(
             api_key=api_key
         )
 
-        if funding_rate is None:
+        funding = futures.get(
+            "funding_rate"
+        )
 
+        oi = futures.get(
+            "open_interest"
+        )
+
+        volume = futures.get(
+            "volume_24h"
+        )
+
+        index_price = futures.get(
+            "index"
+        )
+
+        basis = futures.get(
+            "basis"
+        )
+
+        if funding is None:
             funding_text = "Không có dữ liệu"
-
         else:
-
             funding_text = (
-                f"{funding_rate * 100:.4f}%"
+                f"{funding * 100:.4f}%"
             )
 
-        if open_interest is None:
-
+        if oi is None:
             oi_text = "Không có dữ liệu"
-
         else:
-
             oi_text = (
-                f"{open_interest:,.2f}"
+                f"${oi:,.0f}"
+            )
+
+        if volume is None:
+            volume_text = "Không có dữ liệu"
+        else:
+            volume_text = (
+                f"${volume:,.0f}"
+            )
+
+        if index_price is None:
+            index_text = "Không có dữ liệu"
+        else:
+            index_text = (
+                f"${index_price:.2f}"
+            )
+
+        if basis is None:
+            basis_text = "Không có dữ liệu"
+        else:
+            basis_text = (
+                f"{basis:.4f}%"
             )
 
         news_text = "\n".join(
-            f"- {item}"
-            for item in news
+            f"- {x}"
+            for x in news
         )
 
         prompt = f"""
-Bạn là chuyên gia phân tích WTI Crude Oil
+Bạn là chuyên gia phân tích dầu WTI
 trên Binance Futures.
 
-NGUỒN DỮ LIỆU:
-{data_source}
+Dữ liệu Futures hiện tại lấy qua CoinGecko.
 
 SYMBOL:
-CLUSDT
+{ticker}
 
 GIÁ:
 ${technical['price']:.2f}
+
+INDEX PRICE:
+{index_text}
+
+BASIS:
+{basis_text}
 
 RSI:
 {technical['rsi']:.2f}
@@ -1023,7 +1093,7 @@ ${technical['ema50']:.2f}
 ĐIỂM KỸ THUẬT:
 {technical['score']}
 
-XU HƯỚNG KỸ THUẬT:
+XU HƯỚNG:
 {technical['direction']}
 
 FUNDING RATE:
@@ -1032,12 +1102,15 @@ FUNDING RATE:
 OPEN INTEREST:
 {oi_text}
 
+VOLUME 24H:
+{volume_text}
+
 TIN TỨC:
 {news_text}
 
 Hãy trả lời bằng tiếng Việt.
 
-Bắt buộc theo cấu trúc:
+Cấu trúc:
 
 🎯 TÍN HIỆU
 LONG / SHORT / WAIT
@@ -1046,45 +1119,45 @@ LONG / SHORT / WAIT
 Tăng / Giảm / Đi ngang
 
 📊 KỸ THUẬT
-Phân tích RSI, MACD, EMA20, EMA50.
+Phân tích RSI, MACD, EMA20 và EMA50.
 
 💰 FUTURES SENTIMENT
-Phân tích Funding Rate và Open Interest
-nếu có dữ liệu.
+Phân tích Funding Rate,
+Open Interest và Volume.
 
 📰 VĨ MÔ
-Phân tích OPEC, cung cầu, tồn kho,
-địa chính trị và nhu cầu dầu.
+Phân tích OPEC, cung cầu,
+tồn kho và địa chính trị.
 
 💡 KỊCH BẢN
 LONG:
-Điều kiện để cân nhắc LONG.
+Điều kiện.
 
 SHORT:
-Điều kiện để cân nhắc SHORT.
+Điều kiện.
 
 WAIT:
-Khi nào nên đứng ngoài.
+Điều kiện.
 
 ⚠️ RỦI RO
-Các yếu tố có thể làm nhận định sai.
+Những yếu tố có thể làm tín hiệu sai.
 
 QUY TẮC:
 
-- Không khẳng định chắc chắn giá tăng hoặc giảm.
-- Không tự bịa dữ liệu chưa được cung cấp.
-- Nếu dữ liệu Futures bị thiếu, hãy nói rõ.
-- Không viết HTML.
-- Không sử dụng ký hiệu lạ làm hỏng Markdown.
-- Chỉ dùng Markdown đơn giản.
-- Đây là phân tích tham khảo, không phải lời khuyên đầu tư.
+- Không khẳng định chắc chắn giá.
+- Không tự tạo dữ liệu.
+- Không dùng HTML.
+- Không dùng ký tự lỗi mã hóa.
+- Markdown đơn giản.
+- Không gọi CL=F là CLUSDT.
+- Đây chỉ là phân tích tham khảo.
 """
 
         interaction = client.interactions.create(
             model="gemini-3.6-flash",
             input=prompt,
             generation_config={
-                "thinking_level": "low"
+                "thinking_level": "low",
             },
         )
 
@@ -1095,6 +1168,7 @@ QUY TẮC:
             )
             and interaction.output_text
         ):
+
             return interaction.output_text
 
         return (
@@ -1105,16 +1179,16 @@ QUY TẮC:
 
         return (
             "❌ GEMINI ERROR\n\n"
-            f"{str(exc)}"
+            f"{exc}"
         )
 
 
 # ============================================================
-# BIỂU ĐỒ NẾN
+# CANDLE CHART
 # ============================================================
 
-def create_candle_chart(
-    df
+def candle_chart(
+    df,
 ):
 
     chart_df = df.tail(
@@ -1149,7 +1223,7 @@ def create_candle_chart(
             close=chart_df[
                 "close"
             ],
-            name="CLUSDT",
+            name=SYMBOL,
         ),
         row=1,
         col=1,
@@ -1163,11 +1237,8 @@ def create_candle_chart(
             y=chart_df[
                 "ema20"
             ],
-            mode="lines",
             name="EMA20",
-            line=dict(
-                width=1.5
-            ),
+            mode="lines",
         ),
         row=1,
         col=1,
@@ -1181,11 +1252,8 @@ def create_candle_chart(
             y=chart_df[
                 "ema50"
             ],
-            mode="lines",
             name="EMA50",
-            line=dict(
-                width=1.5
-            ),
+            mode="lines",
         ),
         row=1,
         col=1,
@@ -1206,8 +1274,11 @@ def create_candle_chart(
     )
 
     fig.update_layout(
-        title=f"CLUSDT — {interval}",
         height=650,
+        title=(
+            f"{SYMBOL} — Biểu đồ nến "
+            f"({interval})"
+        ),
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(
@@ -1225,8 +1296,8 @@ def create_candle_chart(
 # RSI CHART
 # ============================================================
 
-def create_rsi_chart(
-    df
+def rsi_chart(
+    df,
 ):
 
     chart_df = df.tail(
@@ -1243,8 +1314,8 @@ def create_rsi_chart(
             y=chart_df[
                 "rsi"
             ],
-            mode="lines",
             name="RSI",
+            mode="lines",
         )
     )
 
@@ -1264,16 +1335,10 @@ def create_rsi_chart(
     )
 
     fig.update_layout(
-        title="RSI(14)",
         height=300,
+        title="RSI(14)",
         yaxis=dict(
             range=[0, 100]
-        ),
-        margin=dict(
-            l=10,
-            r=10,
-            t=45,
-            b=10,
         ),
     )
 
@@ -1284,8 +1349,8 @@ def create_rsi_chart(
 # MACD CHART
 # ============================================================
 
-def create_macd_chart(
-    df
+def macd_chart(
+    df,
 ):
 
     chart_df = df.tail(
@@ -1302,8 +1367,8 @@ def create_macd_chart(
             y=chart_df[
                 "macd"
             ],
-            mode="lines",
             name="MACD",
+            mode="lines",
         )
     )
 
@@ -1315,8 +1380,8 @@ def create_macd_chart(
             y=chart_df[
                 "signal"
             ],
-            mode="lines",
             name="Signal",
+            mode="lines",
         )
     )
 
@@ -1331,14 +1396,8 @@ def create_macd_chart(
     )
 
     fig.update_layout(
-        title="MACD (12,26,9)",
         height=320,
-        margin=dict(
-            l=10,
-            r=10,
-            t=45,
-            b=10,
-        ),
+        title="MACD(12,26,9)",
     )
 
     return fig
@@ -1354,7 +1413,11 @@ if st.button(
     use_container_width=True,
 ):
 
-    if not api_key.strip():
+    # ========================================================
+    # KIỂM TRA GEMINI
+    # ========================================================
+
+    if not gemini_api_key.strip():
 
         st.error(
             "⚠️ Vui lòng nhập Gemini API Key."
@@ -1363,138 +1426,86 @@ if st.button(
         st.stop()
 
     # ========================================================
-    # 1. THỬ BINANCE REST
+    # COINGECKO
     # ========================================================
 
     with st.spinner(
-        "1/5: Đang kiểm tra Binance Futures..."
+        "1/5: Đang lấy dữ liệu CLUSDT từ CoinGecko..."
     ):
 
-        rest_df, rest_error = (
-            get_binance_rest_klines(
-                SYMBOL,
+        futures, cg_error = (
+            get_clusdt_from_coingecko()
+        )
+
+    if futures is None:
+
+        st.error(
+            "❌ Không lấy được CLUSDT từ CoinGecko."
+        )
+
+        st.code(
+            str(cg_error)
+        )
+
+        st.stop()
+
+    # ========================================================
+    # NẾN
+    # ========================================================
+
+    with st.spinner(
+        "2/5: Đang lấy dữ liệu nến CLUSDT..."
+    ):
+
+        candles, candle_error = (
+            get_binance_candles(
                 interval,
                 limit,
             )
         )
 
-    source_label = ""
+    if candles is None:
+
+        st.error(
+            "❌ Không lấy được dữ liệu nến CLUSDT."
+        )
+
+        st.code(
+            str(candle_error)
+        )
+
+        st.info(
+            "CoinGecko cung cấp dữ liệu Futures "
+            "hiện tại nhưng không có OHLC lịch sử "
+            "riêng cho CLUSDT trong endpoint derivatives. "
+            "App không tạo nến giả."
+        )
+
+        st.stop()
 
     # ========================================================
-    # NẾU REST CHẠY
-    # ========================================================
-
-    if rest_df is not None:
-
-        df = rest_df
-
-        source_label = (
-            "Binance Futures REST API"
-        )
-
-        st.success(
-            "✅ Đang dùng Binance Futures REST."
-        )
-
-    else:
-
-        # ====================================================
-        # 2. BINANCE DATA ARCHIVE
-        # ====================================================
-
-        st.warning(
-            "⚠️ Binance Futures REST không truy cập được. "
-            "Đang chuyển sang Binance Public Data Archive..."
-        )
-
-        with st.spinner(
-            "2/5: Đang tải dữ liệu nến CLUSDT từ Binance Archive..."
-        ):
-
-            archive_df, archive_source = (
-                get_binance_archive_klines(
-                    SYMBOL,
-                    interval,
-                    limit,
-                )
-            )
-
-        if archive_df is None:
-
-            st.error(
-                "❌ Không lấy được dữ liệu CLUSDT từ Binance."
-            )
-
-            with st.expander(
-                "Chi tiết lỗi REST"
-            ):
-                st.code(
-                    str(rest_error)
-                )
-
-            st.warning(
-                "App sẽ không tự chuyển sang CL=F. "
-                "Bạn đang yêu cầu phân tích Binance CLUSDT, "
-                "nên tránh trộn dữ liệu NYMEX/Yahoo vào tín hiệu Binance."
-            )
-
-            st.stop()
-
-        df = archive_df
-
-        source_label = archive_source
-
-        st.success(
-            "✅ Đang dùng Binance Public Data Archive."
-        )
-
-    # ========================================================
-    # TECHNICAL
+    # INDICATORS
     # ========================================================
 
     with st.spinner(
         "3/5: Đang tính RSI, MACD và EMA..."
     ):
 
-        df = add_indicators(
-            df
+        candles = add_indicators(
+            candles
         )
 
-        if len(df) < 30:
+        if len(candles) < 30:
 
             st.error(
-                "Không đủ dữ liệu để tính chỉ báo."
+                "Không đủ nến để tính chỉ báo."
             )
 
             st.stop()
 
-        technical = technical_analysis(
-            df
-        )
-
-    # ========================================================
-    # FUNDING + OI
-    # ========================================================
-
-    with st.spinner(
-        "4/5: Đang lấy Funding Rate và Open Interest..."
-    ):
-
-        funding_rate = (
-            get_funding_rate(
-                SYMBOL
-            )
-        )
-
-        open_interest = (
-            get_open_interest(
-                SYMBOL
-            )
-        )
-
-        mark_data = (
-            get_binance_mark_price(
-                SYMBOL
+        technical = (
+            technical_analysis(
+                candles
             )
         )
 
@@ -1502,28 +1513,39 @@ if st.button(
     # NEWS
     # ========================================================
 
-    news = get_news()
+    with st.spinner(
+        "4/5: Đang lấy tin tức dầu mỏ..."
+    ):
+
+        news = get_news()
 
     # ========================================================
-    # HEADER STATUS
+    # DASHBOARD
     # ========================================================
 
     st.subheader(
-        "📊 BINANCE CLUSDT"
+        "📊 Binance CLUSDT"
     )
 
     c1, c2, c3, c4 = (
         st.columns(4)
     )
 
+    # Ưu tiên giá CoinGecko
+    live_price = (
+        futures["price"]
+        if futures["price"] is not None
+        else technical["price"]
+    )
+
     c1.metric(
-        "💵 Giá",
-        f"${technical['price']:.2f}"
+        "💵 Giá CLUSDT",
+        f"${live_price:.2f}",
     )
 
     c2.metric(
         "RSI",
-        f"{technical['rsi']:.2f}"
+        f"{technical['rsi']:.2f}",
     )
 
     c3.metric(
@@ -1533,45 +1555,61 @@ if st.button(
             if technical["macd"]
             > technical["signal"]
             else "🔴 Giảm"
-        )
+        ),
     )
 
     c4.metric(
-        "Xu hướng",
-        technical["direction"]
+        "Xu hướng kỹ thuật",
+        technical["direction"],
     )
 
     # ========================================================
-    # FUTURES
+    # FUTURES DATA
     # ========================================================
 
     st.subheader(
-        "📡 Futures Data"
+        "📡 Futures Sentiment"
     )
 
-    f1, f2, f3 = (
-        st.columns(3)
+    f1, f2, f3, f4 = (
+        st.columns(4)
     )
 
-    if funding_rate is not None:
+    funding = futures[
+        "funding_rate"
+    ]
+
+    oi = futures[
+        "open_interest"
+    ]
+
+    vol24 = futures[
+        "volume_24h"
+    ]
+
+    index_price = futures[
+        "index"
+    ]
+
+    if funding is not None:
 
         f1.metric(
-            "Funding Rate",
-            f"{funding_rate * 100:.4f}%",
+            "Funding",
+            f"{funding * 100:.4f}%",
         )
 
     else:
 
         f1.metric(
-            "Funding Rate",
+            "Funding",
             "N/A",
         )
 
-    if open_interest is not None:
+    if oi is not None:
 
         f2.metric(
             "Open Interest",
-            f"{open_interest:,.2f}",
+            f"${oi:,.0f}",
         )
 
     else:
@@ -1581,42 +1619,75 @@ if st.button(
             "N/A",
         )
 
-    if mark_data:
+    if vol24 is not None:
 
         f3.metric(
-            "Mark Price",
-            f"${mark_data['mark_price']:.2f}",
+            "Volume 24h",
+            f"${vol24:,.0f}",
         )
 
     else:
 
         f3.metric(
-            "Mark Price",
+            "Volume 24h",
+            "N/A",
+        )
+
+    if index_price is not None:
+
+        f4.metric(
+            "Index Price",
+            f"${index_price:.2f}",
+        )
+
+    else:
+
+        f4.metric(
+            "Index Price",
             "N/A",
         )
 
     # ========================================================
-    # NGUỒN DỮ LIỆU
+    # BASIS
     # ========================================================
+
+    basis = futures.get(
+        "basis"
+    )
+
+    if basis is not None:
+
+        st.caption(
+            f"Basis: {basis:.4f}%"
+        )
+
+    # ========================================================
+    # DATA SOURCE
+    # ========================================================
+
+    st.success(
+        "✅ Futures hiện tại: CoinGecko → Binance Futures CLUSDT"
+    )
 
     st.info(
-        f"📡 Nguồn dữ liệu nến: {source_label}"
+        "🕯️ OHLC/nến lịch sử: Binance Public Data Archive. "
+        "Không sử dụng fapi.binance.com."
     )
 
     # ========================================================
-    # CANDLESTICK
+    # CANDLE
     # ========================================================
 
     st.subheader(
         "🕯️ Biểu đồ nến CLUSDT"
     )
 
-    candle_fig = create_candle_chart(
-        df
+    fig = candle_chart(
+        candles
     )
 
     st.plotly_chart(
-        candle_fig,
+        fig,
         use_container_width=True,
         config={
             "displaylogo": False,
@@ -1632,12 +1703,10 @@ if st.button(
         "📈 RSI"
     )
 
-    rsi_fig = create_rsi_chart(
-        df
-    )
-
     st.plotly_chart(
-        rsi_fig,
+        rsi_chart(
+            candles
+        ),
         use_container_width=True,
         config={
             "displaylogo": False
@@ -1652,12 +1721,10 @@ if st.button(
         "📉 MACD"
     )
 
-    macd_fig = create_macd_chart(
-        df
-    )
-
     st.plotly_chart(
-        macd_fig,
+        macd_chart(
+            candles
+        ),
         use_container_width=True,
         config={
             "displaylogo": False
@@ -1672,7 +1739,9 @@ if st.button(
         "🧠 Tín hiệu kỹ thuật"
     )
 
-    for reason in technical["reasons"]:
+    for reason in technical[
+        "reasons"
+    ]:
 
         st.write(
             f"• {reason}"
@@ -1683,16 +1752,17 @@ if st.button(
     # ========================================================
 
     with st.spinner(
-        "5/5: Gemini đang phân tích CLUSDT..."
+        "5/5: Gemini đang tổng hợp dữ liệu..."
     ):
 
-        analysis = analyze_with_gemini(
-            api_key=api_key.strip(),
-            technical=technical,
-            funding_rate=funding_rate,
-            open_interest=open_interest,
-            news=news,
-            data_source=source_label,
+        analysis = (
+            analyze_with_gemini(
+                api_key=gemini_api_key.strip(),
+                ticker=SYMBOL,
+                technical=technical,
+                futures=futures,
+                news=news,
+            )
         )
 
     st.subheader(
@@ -1715,13 +1785,13 @@ if st.button(
         "Xem tin tức"
     ):
 
-        for index, item in enumerate(
+        for i, item in enumerate(
             news,
             start=1,
         ):
 
             st.write(
-                f"**{index}.** {item}"
+                f"**{i}.** {item}"
             )
 
     # ========================================================
@@ -1730,18 +1800,16 @@ if st.button(
 
     st.markdown("---")
 
-    now = datetime.now(
+    current_time = datetime.now(
         timezone.utc
     )
 
     st.caption(
-        f"Symbol: {SYMBOL} | "
-        f"Khung: {interval} | "
+        f"CLUSDT | {interval} | "
         f"Cập nhật: "
-        f"{now.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        f"{current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
 
     st.caption(
-        "⚠️ Dữ liệu và tín hiệu AI chỉ mang tính tham khảo, "
-        "không phải lời khuyên đầu tư."
+        "⚠️ Dữ liệu và phân tích AI chỉ mang tính tham khảo."
     )
