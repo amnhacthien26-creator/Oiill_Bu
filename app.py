@@ -47,7 +47,7 @@ def get_global_news(query="crude oil OR OPEC OR US inventory", max_results=15):
 def ai_analyze_market(news_list, last_price, rsi, macd, signal):
     """Kích hoạt Khối óc LLM để suy luận"""
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-pro")
     
     news_text = "\n".join([f"- {n}" for n in news_list])
     prompt = f"""
