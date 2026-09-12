@@ -1,5 +1,7 @@
 streamlit
 pandas
 requests
+yfinance
+plotly
 ddgs
 google-genai>=2.3.0
