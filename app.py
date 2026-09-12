@@ -1,47 +1,51 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timezone
+import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from ddgs import DDGS
 from google import genai
 
 
 # ============================================================
-# CẤU HÌNH
+# CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Phân tích Dầu Binance",
+    page_title="AI Phân tích Dầu CLUSDT",
     page_icon="🛢️",
     layout="wide"
 )
 
-st.title("🛢️ AI Phân tích Giá Dầu Binance")
+BINANCE_SYMBOL = "CLUSDT"
+
+# Binance Futures fallback endpoints
+BINANCE_FUTURES_BASES = [
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+    "https://fapi4.binance.com",
+]
+
+st.title("🛢️ AI Phân tích Giá Dầu CLUSDT")
 st.markdown(
-    """
-    Phân tích **WTI Crude Oil trên Binance Futures (CLUSDT)**
-    bằng dữ liệu giá, RSI, MACD, Volume, Funding Rate,
-    Open Interest và tin tức vĩ mô.
-    """
+    "Phân tích WTI bằng nến Binance, RSI, MACD, EMA, Volume, "
+    "Funding, Open Interest, tin tức và Gemini AI."
 )
-
-# Binance public Futures API
-BINANCE_BASE_URL = "https://fapi.binance.com"
-
-# Hợp đồng dầu WTI trên Binance
-SYMBOL = "CLUSDT"
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.header("⚙️ Cấu hình")
+st.sidebar.header("⚙️ CẤU HÌNH")
 
 api_key = st.sidebar.text_input(
     "🔑 Gemini API Key",
     type="password",
-    placeholder="Dán Gemini API Key vào đây"
+    placeholder="Dán Gemini API Key"
 )
 
 st.sidebar.markdown(
@@ -49,95 +53,101 @@ st.sidebar.markdown(
     "(https://aistudio.google.com/apikey)"
 )
 
-st.sidebar.markdown("---")
-
 interval = st.sidebar.selectbox(
     "⏱️ Khung thời gian",
-    [
-        "5m",
-        "15m",
-        "30m",
-        "1h",
-        "4h",
-        "1d"
-    ],
+    ["5m", "15m", "30m", "1h", "4h", "1d"],
     index=3
 )
 
-kline_limit = st.sidebar.selectbox(
-    "📊 Số nến phân tích",
+limit = st.sidebar.selectbox(
+    "📊 Số nến",
     [100, 200, 300, 500],
     index=1
 )
 
 st.sidebar.markdown("---")
 
-st.sidebar.info(
-    """
-    **Binance Futures**
+st.sidebar.warning(
+    "Dữ liệu Binance có thể bị giới hạn theo khu vực/IP. "
+    "App có cơ chế fallback để không bị sập."
+)
 
-    Symbol: CLUSDT  
-    Tài sản: WTI Crude Oil  
-    Giao dịch: 24/7
-
-    ⚠️ Dữ liệu và AI chỉ mang tính
-    chất tham khảo, không phải lời
-    khuyên đầu tư.
-    """
+st.sidebar.caption(
+    "⚠️ Chỉ dùng để tham khảo, không phải lời khuyên đầu tư."
 )
 
 
 # ============================================================
-# HÀM GỌI BINANCE API
+# HTTP SESSION
 # ============================================================
 
-def binance_get(endpoint, params=None, timeout=15):
-    """
-    Gọi Binance Futures Public API.
-    """
+@st.cache_resource
+def get_http_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+        ),
+        "Accept": "application/json",
+    })
+    return session
 
-    try:
-        url = BINANCE_BASE_URL + endpoint
 
-        response = requests.get(
-            url,
-            params=params or {},
-            timeout=timeout
-        )
-
-        response.raise_for_status()
-
-        return response.json(), None
-
-    except requests.exceptions.RequestException as e:
-
-        return (
-            None,
-            f"Lỗi kết nối Binance: {e}"
-        )
-
-    except Exception as e:
-
-        return (
-            None,
-            f"Lỗi Binance API: {e}"
-        )
+SESSION = get_http_session()
 
 
 # ============================================================
-# LẤY CANDLESTICK
+# BINANCE REQUEST
+# ============================================================
+
+def binance_request(path, params=None):
+    """
+    Thử lần lượt nhiều Binance Futures endpoint.
+    Trả về data + endpoint đang hoạt động + lỗi cuối.
+    """
+
+    last_error = None
+
+    for base in BINANCE_FUTURES_BASES:
+
+        url = f"{base}{path}"
+
+        try:
+            response = SESSION.get(
+                url,
+                params=params or {},
+                timeout=12
+            )
+
+            # Không retry các lỗi logic kiểu 400 nếu endpoint trả được
+            if response.status_code == 200:
+                return response.json(), base, None
+
+            last_error = (
+                f"{base} -> HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+
+        except requests.RequestException as exc:
+            last_error = f"{base} -> {exc}"
+
+        except Exception as exc:
+            last_error = f"{base} -> {exc}"
+
+    return None, None, last_error
+
+
+# ============================================================
+# BINANCE KLINES
 # ============================================================
 
 def get_binance_klines(
-    symbol=SYMBOL,
+    symbol="CLUSDT",
     interval="1h",
     limit=200
 ):
-    """
-    Lấy dữ liệu nến Binance Futures.
-    """
-
-    data, error = binance_get(
+    data, endpoint, error = binance_request(
         "/fapi/v1/klines",
         {
             "symbol": symbol,
@@ -146,231 +156,101 @@ def get_binance_klines(
         }
     )
 
-    if error:
-        return None, error
-
-    if not data:
-        return None, "Binance không trả về dữ liệu nến."
+    if data is None:
+        return None, None, error
 
     try:
-
         columns = [
-            "OpenTime",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "CloseTime",
-            "QuoteVolume",
-            "Trades",
-            "TakerBuyBaseVolume",
-            "TakerBuyQuoteVolume",
-            "Ignore"
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore"
         ]
 
-        df = pd.DataFrame(
-            data,
-            columns=columns
-        )
-
-        # ----------------------------------------------------
-        # Chuyển kiểu dữ liệu
-        # ----------------------------------------------------
+        df = pd.DataFrame(data, columns=columns)
 
         numeric_columns = [
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "QuoteVolume",
-            "Trades",
-            "TakerBuyBaseVolume",
-            "TakerBuyQuoteVolume"
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote"
         ]
 
-        for column in numeric_columns:
-
-            df[column] = pd.to_numeric(
-                df[column],
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(
+                df[col],
                 errors="coerce"
             )
 
-        df["OpenTime"] = pd.to_datetime(
-            df["OpenTime"],
+        df["open_time"] = pd.to_datetime(
+            df["open_time"],
             unit="ms",
             utc=True
         )
 
-        df["CloseTime"] = pd.to_datetime(
-            df["CloseTime"],
+        df["close_time"] = pd.to_datetime(
+            df["close_time"],
             unit="ms",
             utc=True
-        )
-
-        # ====================================================
-        # RSI
-        # ====================================================
-
-        delta = df["Close"].diff()
-
-        gain = delta.clip(
-            lower=0
-        )
-
-        loss = -delta.clip(
-            upper=0
-        )
-
-        avg_gain = gain.rolling(
-            window=14,
-            min_periods=14
-        ).mean()
-
-        avg_loss = loss.rolling(
-            window=14,
-            min_periods=14
-        ).mean()
-
-        avg_loss = avg_loss.replace(
-            0,
-            pd.NA
-        )
-
-        rs = avg_gain / avg_loss
-
-        df["RSI"] = (
-            100 -
-            (
-                100 /
-                (1 + rs)
-            )
-        )
-
-        df["RSI"] = df["RSI"].fillna(50)
-
-        # ====================================================
-        # MACD
-        # ====================================================
-
-        ema12 = df["Close"].ewm(
-            span=12,
-            adjust=False
-        ).mean()
-
-        ema26 = df["Close"].ewm(
-            span=26,
-            adjust=False
-        ).mean()
-
-        df["MACD"] = (
-            ema12 -
-            ema26
-        )
-
-        df["Signal"] = (
-            df["MACD"]
-            .ewm(
-                span=9,
-                adjust=False
-            )
-            .mean()
-        )
-
-        df["MACD_Histogram"] = (
-            df["MACD"] -
-            df["Signal"]
-        )
-
-        # ====================================================
-        # EMA
-        # ====================================================
-
-        df["EMA20"] = (
-            df["Close"]
-            .ewm(
-                span=20,
-                adjust=False
-            )
-            .mean()
-        )
-
-        df["EMA50"] = (
-            df["Close"]
-            .ewm(
-                span=50,
-                adjust=False
-            )
-            .mean()
         )
 
         df = df.dropna(
             subset=[
-                "Close",
-                "RSI",
-                "MACD",
-                "Signal"
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
             ]
         )
 
-        return df, None
+        if df.empty:
+            return None, None, "Binance trả dữ liệu rỗng."
 
-    except Exception as e:
+        return df, endpoint, None
 
-        return (
-            None,
-            f"Lỗi xử lý dữ liệu nến: {e}"
-        )
+    except Exception as exc:
+        return None, endpoint, f"Lỗi xử lý nến Binance: {exc}"
 
 
 # ============================================================
-# GIÁ HIỆN TẠI
+# BINANCE CURRENT PRICE
 # ============================================================
 
-def get_current_price(
-    symbol=SYMBOL
-):
-    """
-    Lấy giá hiện tại của CLUSDT.
-    """
-
-    data, error = binance_get(
+def get_binance_price(symbol="CLUSDT"):
+    data, endpoint, error = binance_request(
         "/fapi/v1/ticker/price",
-        {
-            "symbol": symbol
-        }
+        {"symbol": symbol}
     )
 
-    if error:
-        return None, error
+    if data is None:
+        return None, endpoint, error
 
     try:
-
-        return float(
-            data["price"]
-        ), None
-
-    except Exception:
-
-        return (
-            None,
-            "Không đọc được giá hiện tại."
-        )
+        return float(data["price"]), endpoint, None
+    except Exception as exc:
+        return None, endpoint, f"Lỗi giá Binance: {exc}"
 
 
 # ============================================================
-# FUNDING RATE
+# BINANCE FUNDING
 # ============================================================
 
-def get_funding_rate(
-    symbol=SYMBOL
-):
-    """
-    Lấy funding rate gần nhất.
-    """
-
-    data, error = binance_get(
+def get_binance_funding(symbol="CLUSDT"):
+    data, endpoint, error = binance_request(
         "/fapi/v1/fundingRate",
         {
             "symbol": symbol,
@@ -378,146 +258,250 @@ def get_funding_rate(
         }
     )
 
-    if error:
-        return None, error
-
-    if not data:
-        return None, "Không có Funding Rate."
+    if data is None:
+        return None, endpoint, error
 
     try:
-
-        funding = float(
-            data[-1]["fundingRate"]
-        )
-
-        funding_time = pd.to_datetime(
-            data[-1]["fundingTime"],
-            unit="ms",
-            utc=True
-        )
-
-        return {
-            "rate": funding,
-            "time": funding_time
-        }, None
-
-    except Exception as e:
-
-        return (
-            None,
-            f"Lỗi Funding Rate: {e}"
-        )
-
-
-# ============================================================
-# OPEN INTEREST
-# ============================================================
-
-def get_open_interest(
-    symbol=SYMBOL
-):
-    """
-    Lấy Open Interest hiện tại.
-    """
-
-    data, error = binance_get(
-        "/fapi/v1/openInterest",
-        {
-            "symbol": symbol
-        }
-    )
-
-    if error:
-        return None, error
-
-    try:
-
-        return float(
-            data["openInterest"]
-        ), None
-
-    except Exception:
-
-        return (
-            None,
-            "Không đọc được Open Interest."
-        )
-
-
-# ============================================================
-# LONG / SHORT RATIO
-# ============================================================
-
-def get_long_short_ratio(
-    symbol=SYMBOL,
-    period="1h"
-):
-    """
-    Lấy tỷ lệ Long/Short của Binance Futures.
-
-    Nếu Binance không trả dữ liệu cho symbol này,
-    app vẫn tiếp tục hoạt động.
-    """
-
-    data, error = binance_get(
-        "/futures/data/globalLongShortAccountRatio",
-        {
-            "symbol": symbol,
-            "period": period,
-            "limit": 1
-        }
-    )
-
-    if error:
-        return None, error
-
-    if not data:
-        return None, "Không có dữ liệu Long/Short."
-
-    try:
+        if not data:
+            return None, endpoint, "Không có funding."
 
         item = data[-1]
 
         return {
-            "ratio": float(
-                item["longShortRatio"]
-            ),
-            "long": float(
-                item["longAccount"]
-            ) * 100,
-            "short": float(
-                item["shortAccount"]
-            ) * 100
-        }, None
+            "rate": float(item["fundingRate"]),
+            "time": pd.to_datetime(
+                item["fundingTime"],
+                unit="ms",
+                utc=True
+            )
+        }, endpoint, None
 
-    except Exception as e:
-
-        return (
-            None,
-            f"Lỗi Long/Short: {e}"
-        )
+    except Exception as exc:
+        return None, endpoint, f"Lỗi funding: {exc}"
 
 
 # ============================================================
-# TIN TỨC
+# BINANCE OPEN INTEREST
 # ============================================================
 
-def get_global_news(
-    max_results=15
+def get_binance_open_interest(symbol="CLUSDT"):
+    data, endpoint, error = binance_request(
+        "/fapi/v1/openInterest",
+        {"symbol": symbol}
+    )
+
+    if data is None:
+        return None, endpoint, error
+
+    try:
+        return float(data["openInterest"]), endpoint, None
+    except Exception as exc:
+        return None, endpoint, f"Lỗi Open Interest: {exc}"
+
+
+# ============================================================
+# TECHNICAL INDICATORS
+# ============================================================
+
+def add_indicators(df):
+    df = df.copy()
+
+    # RSI
+    delta = df["close"].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(
+        14,
+        min_periods=14
+    ).mean()
+
+    avg_loss = loss.rolling(
+        14,
+        min_periods=14
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+
+    df["rsi"] = (
+        100 -
+        (100 / (1 + rs))
+    )
+
+    df["rsi"] = df["rsi"].fillna(50)
+
+    # EMA
+    df["ema20"] = df["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df["ema50"] = df["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    # MACD
+    ema12 = df["close"].ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = df["close"].ewm(
+        span=26,
+        adjust=False
+    ).mean()
+
+    df["macd"] = ema12 - ema26
+
+    df["signal"] = df["macd"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    df["histogram"] = (
+        df["macd"] -
+        df["signal"]
+    )
+
+    return df
+
+
+# ============================================================
+# YAHOO FALLBACK
+# ============================================================
+
+def get_yahoo_fallback(
+    interval="1h",
+    limit=200
 ):
     """
-    Tìm tin tức dầu mỏ, OPEC, địa chính trị.
+    Fallback khi Binance bị HTTP 451 hoặc bị chặn.
+    Đây là WTI futures CL=F, KHÔNG phải CLUSDT Binance.
     """
 
+    period_map = {
+        "5m": "10d",
+        "15m": "60d",
+        "30m": "60d",
+        "1h": "730d",
+        "4h": "730d",
+        "1d": "max"
+    }
+
+    interval_map = {
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "1h",
+        "4h": "1h",
+        "1d": "1d"
+    }
+
+    try:
+
+        raw = yf.download(
+            "CL=F",
+            period=period_map.get(
+                interval,
+                "730d"
+            ),
+            interval=interval_map.get(
+                interval,
+                "1h"
+            ),
+            auto_adjust=False,
+            progress=False
+        )
+
+        if raw is None or raw.empty:
+            return None, "Yahoo Finance không có dữ liệu."
+
+        # MultiIndex
+        if isinstance(
+            raw.columns,
+            pd.MultiIndex
+        ):
+            raw.columns = (
+                raw.columns
+                .get_level_values(0)
+            )
+
+        raw.columns = [
+            str(c).lower()
+            for c in raw.columns
+        ]
+
+        required = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+
+        if not all(
+            col in raw.columns
+            for col in required
+        ):
+            return None, "Yahoo thiếu OHLCV."
+
+        df = raw[required].copy()
+
+        for col in required:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+        df = df.dropna()
+
+        if interval == "4h":
+            # resample 1h -> 4h
+            df = df.resample("4h").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum"
+            }).dropna()
+
+        df = df.tail(limit)
+
+        if df.empty:
+            return None, "Yahoo không đủ dữ liệu."
+
+        df.index = pd.to_datetime(
+            df.index,
+            utc=True
+        )
+
+        df = df.reset_index(
+            names="open_time"
+        )
+
+        return df, None
+
+    except Exception as exc:
+        return None, f"Yahoo fallback lỗi: {exc}"
+
+
+# ============================================================
+# NEWS
+# ============================================================
+
+def get_global_news(max_results=12):
+
     queries = [
-        "WTI crude oil price",
-        "OPEC oil production",
-        "crude oil inventory",
+        "WTI crude oil",
+        "OPEC oil",
+        "oil inventory",
         "oil geopolitics",
-        "US crude oil demand"
+        "WTI oil forecast"
     ]
 
-    all_news = []
+    articles = []
 
     try:
 
@@ -526,7 +510,6 @@ def get_global_news(
             for query in queries:
 
                 try:
-
                     results = ddgs.news(
                         query=query,
                         max_results=4
@@ -534,181 +517,144 @@ def get_global_news(
 
                     for item in results:
 
-                        title = item.get(
-                            "title"
-                        )
+                        title = item.get("title")
 
                         if title:
-                            all_news.append(
+                            articles.append(
                                 title.strip()
                             )
 
                 except Exception:
                     continue
 
-        # Loại bỏ tin trùng
-        unique_news = list(
-            dict.fromkeys(
-                all_news
-            )
+        articles = list(
+            dict.fromkeys(articles)
         )
 
-        if not unique_news:
-
+        if not articles:
             return [
-                "Không lấy được tin tức mới."
+                "Không lấy được tin tức hiện tại."
             ]
 
-        return unique_news[:max_results]
+        return articles[:max_results]
 
-    except Exception as e:
-
+    except Exception as exc:
         return [
-            "Không thể lấy tin tức.",
-            f"Lỗi nguồn tin: {e}"
+            f"Không thể lấy tin tức: {exc}"
         ]
 
 
 # ============================================================
-# PHÂN TÍCH KỸ THUẬT
+# TECHNICAL SUMMARY
 # ============================================================
 
-def technical_signal(
-    rsi,
-    macd,
-    signal,
-    close,
-    ema20,
-    ema50
-):
+def get_technical_summary(df):
+
+    last = df.iloc[-1]
+
+    price = float(last["close"])
+    rsi = float(last["rsi"])
+    macd = float(last["macd"])
+    signal = float(last["signal"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
 
     score = 0
+
     reasons = []
 
-    # RSI
-    if rsi < 30:
-
-        score += 2
-
+    if rsi >= 70:
+        score -= 2
         reasons.append(
-            "RSI quá bán → có khả năng hồi phục."
+            "RSI trên 70: thị trường đang quá mua."
         )
 
-    elif rsi > 70:
-
-        score -= 2
-
+    elif rsi <= 30:
+        score += 2
         reasons.append(
-            "RSI quá mua → có nguy cơ điều chỉnh."
+            "RSI dưới 30: thị trường đang quá bán."
         )
 
     elif rsi >= 50:
-
         score += 1
-
         reasons.append(
-            "RSI trên 50 → động lượng tăng tốt hơn."
+            "RSI trên 50: động lượng nghiêng tăng."
         )
 
     else:
-
         score -= 1
-
         reasons.append(
-            "RSI dưới 50 → động lượng yếu."
+            "RSI dưới 50: động lượng nghiêng giảm."
         )
 
-    # MACD
     if macd > signal:
-
         score += 2
-
         reasons.append(
-            "MACD trên Signal → tín hiệu tăng."
+            "MACD trên Signal: động lượng tăng."
         )
-
     else:
-
         score -= 2
-
         reasons.append(
-            "MACD dưới Signal → tín hiệu giảm."
+            "MACD dưới Signal: động lượng giảm."
         )
 
-    # EMA
-    if close > ema20:
-
+    if price > ema20:
         score += 1
-
         reasons.append(
-            "Giá trên EMA20."
+            "Giá nằm trên EMA20."
         )
-
     else:
-
         score -= 1
-
         reasons.append(
-            "Giá dưới EMA20."
+            "Giá nằm dưới EMA20."
         )
 
-    if close > ema50:
-
+    if price > ema50:
         score += 1
-
         reasons.append(
-            "Giá trên EMA50."
+            "Giá nằm trên EMA50."
         )
-
     else:
-
         score -= 1
-
         reasons.append(
-            "Giá dưới EMA50."
+            "Giá nằm dưới EMA50."
         )
 
-    # Tổng hợp
     if score >= 4:
-
         direction = "TĂNG MẠNH"
-
     elif score >= 2:
-
         direction = "TĂNG"
-
     elif score <= -4:
-
         direction = "GIẢM MẠNH"
-
     elif score <= -2:
-
         direction = "GIẢM"
-
     else:
-
         direction = "ĐI NGANG"
 
-    return direction, score, reasons
+    return {
+        "price": price,
+        "rsi": rsi,
+        "macd": macd,
+        "signal": signal,
+        "ema20": ema20,
+        "ema50": ema50,
+        "score": score,
+        "direction": direction,
+        "reasons": reasons
+    }
 
 
 # ============================================================
-# GEMINI AI
+# GEMINI
 # ============================================================
 
-def ai_analyze_market(
+def ai_analyze(
+    api_key,
     news,
-    price,
-    rsi,
-    macd,
-    signal,
-    volume,
+    technical,
     funding_rate,
     open_interest,
-    long_short,
-    technical_direction,
-    technical_score,
-    api_key
+    source_name
 ):
 
     try:
@@ -718,270 +664,105 @@ def ai_analyze_market(
         )
 
         news_text = "\n".join(
-            [
-                f"- {item}"
-                for item in news
-            ]
+            f"- {x}"
+            for x in news
         )
 
-        # ====================================================
-        # Funding
-        # ====================================================
-
-        funding_percent = (
-            funding_rate * 100
-        )
-
-        if funding_rate > 0:
-
-            funding_status = (
-                "Funding dương → Long đang trả phí cho Short."
-            )
-
-        elif funding_rate < 0:
-
-            funding_status = (
-                "Funding âm → Short đang trả phí cho Long."
-            )
-
+        if funding_rate is None:
+            funding_rate_text = "Không có dữ liệu"
         else:
-
-            funding_status = (
-                "Funding gần trung tính."
+            funding_rate_text = (
+                f"{funding_rate * 100:.4f}%"
             )
 
-        # ====================================================
-        # Long Short
-        # ====================================================
-
-        if long_short:
-
-            ls_ratio = (
-                long_short["ratio"]
-            )
-
-            ls_long = (
-                long_short["long"]
-            )
-
-            ls_short = (
-                long_short["short"]
-            )
-
-            if ls_ratio > 1:
-
-                ls_status = (
-                    "Tỷ lệ tài khoản Long cao hơn Short."
-                )
-
-            elif ls_ratio < 1:
-
-                ls_status = (
-                    "Tỷ lệ tài khoản Short cao hơn Long."
-                )
-
-            else:
-
-                ls_status = (
-                    "Long và Short khá cân bằng."
-                )
-
+        if open_interest is None:
+            oi_text = "Không có dữ liệu"
         else:
-
-            ls_ratio = 0
-            ls_long = 0
-            ls_short = 0
-
-            ls_status = (
-                "Không có dữ liệu Long/Short."
-            )
-
-        # ====================================================
-        # RSI
-        # ====================================================
-
-        if rsi >= 70:
-
-            rsi_status = "QUÁ MUA"
-
-        elif rsi <= 30:
-
-            rsi_status = "QUÁ BÁN"
-
-        elif rsi >= 50:
-
-            rsi_status = "TÍCH CỰC"
-
-        else:
-
-            rsi_status = "TIÊU CỰC"
-
-        # ====================================================
-        # MACD
-        # ====================================================
-
-        if macd > signal:
-
-            macd_status = "TĂNG"
-
-        else:
-
-            macd_status = "GIẢM"
-
-        # ====================================================
-        # PROMPT
-        # ====================================================
+            oi_text = f"{open_interest:,.2f}"
 
         prompt = f"""
-Bạn là chuyên gia phân tích WTI Crude Oil
-trên Binance Futures.
+Bạn là chuyên gia phân tích WTI Crude Oil.
 
-Phân tích toàn bộ dữ liệu dưới đây.
+Nguồn dữ liệu:
+{source_name}
 
-====================================================
-THỊ TRƯỜNG
-====================================================
+Lưu ý:
+Nếu nguồn là fallback Yahoo Finance thì KHÔNG được gọi đây
+là dữ liệu CLUSDT Binance. Hãy phân biệt rõ WTI futures và
+Binance CLUSDT.
 
-Symbol:
-CLUSDT
+================================
+DỮ LIỆU
+================================
 
-Giá hiện tại:
-${price:.2f}
-
-Khung thời gian:
-{interval}
-
-Volume:
-{volume:,.2f}
-
-====================================================
-TECHNICAL
-====================================================
+Giá:
+${technical['price']:.2f}
 
 RSI:
-{rsi:.2f}
-
-Trạng thái RSI:
-{rsi_status}
+{technical['rsi']:.2f}
 
 MACD:
-{macd:.4f}
+{technical['macd']:.4f}
 
 Signal:
-{signal:.4f}
+{technical['signal']:.4f}
 
-MACD:
-{macd_status}
+EMA20:
+{technical['ema20']:.2f}
 
-Tín hiệu tổng hợp kỹ thuật:
-{technical_direction}
+EMA50:
+{technical['ema50']:.2f}
 
 Điểm kỹ thuật:
-{technical_score}
+{technical['score']}
 
-====================================================
-BINANCE FUTURES
-====================================================
+Xu hướng kỹ thuật:
+{technical['direction']}
 
 Funding Rate:
-{funding_percent:.4f}%
-
-Trạng thái Funding:
-{funding_status}
+{funding_rate_text}
 
 Open Interest:
-{open_interest:,.2f}
+{oi_text}
 
-Long/Short Ratio:
-{ls_ratio:.4f}
-
-Long Account:
-{ls_long:.2f}%
-
-Short Account:
-{ls_short:.2f}%
-
-Nhận định Long/Short:
-{ls_status}
-
-====================================================
+================================
 TIN TỨC
-====================================================
+================================
 
 {news_text}
 
-====================================================
+================================
 YÊU CẦU
-====================================================
+================================
 
-Hãy phân tích bằng tiếng Việt.
+Phân tích bằng tiếng Việt.
 
-Không chỉ dựa vào RSI/MACD.
-Hãy kết hợp:
+Trả lời:
 
-- Giá
-- RSI
-- MACD
-- Volume
-- EMA
-- Funding Rate
-- Open Interest
-- Long/Short
-- Tin tức
-- OPEC
-- Tồn kho dầu
-- Cung cầu
-- Địa chính trị
-
-Trả lời đúng cấu trúc:
-
-🎯 TÍN HIỆU HIỆN TẠI
-
+🎯 TÍN HIỆU
 LONG / SHORT / WAIT
 
 📈 XU HƯỚNG
-
 Tăng / Giảm / Đi ngang
 
-🧠 PHÂN TÍCH
-
-Giải thích ngắn gọn nhưng cụ thể.
-
-📊 TECHNICAL
-
-Phân tích RSI + MACD + Volume + EMA.
+📊 KỸ THUẬT
+RSI + MACD + EMA + giá.
 
 💰 FUTURES SENTIMENT
+Funding + Open Interest nếu có dữ liệu.
 
-Phân tích Funding + Open Interest + Long/Short.
+📰 VĨ MÔ
+OPEC + cung cầu + tồn kho + địa chính trị.
 
-📰 TÁC ĐỘNG VĨ MÔ
-
-Phân tích OPEC, tồn kho, cung cầu,
-địa chính trị và các tin quan trọng.
-
-💡 KỊCH BẢN GIAO DỊCH
-
-Nêu:
-
-- Điều kiện thuận lợi cho LONG
-- Điều kiện thuận lợi cho SHORT
-- Khi nào nên WAIT
+💡 KỊCH BẢN
+Điều kiện LONG, SHORT và WAIT.
 
 ⚠️ RỦI RO
+Các yếu tố có thể làm nhận định sai.
 
-Nêu các yếu tố có thể khiến nhận định sai.
-
-Không được khẳng định chắc chắn thị trường
-sẽ tăng hay giảm.
-
-Đây chỉ là công cụ phân tích tham khảo,
-không phải lời khuyên đầu tư.
+Không được khẳng định chắc chắn giá sẽ tăng hoặc giảm.
+Đây chỉ là phân tích tham khảo.
 """
-
-        # ====================================================
-        # GEMINI INTERACTIONS API
-        # ====================================================
 
         interaction = client.interactions.create(
             model="gemini-3.6-flash",
@@ -994,73 +775,129 @@ không phải lời khuyên đầu tư.
         if hasattr(
             interaction,
             "output_text"
-        ):
+        ) and interaction.output_text:
 
-            if interaction.output_text:
-
-                return interaction.output_text
-
-        # Fallback
-        if hasattr(
-            interaction,
-            "steps"
-        ):
-
-            for step in reversed(
-                interaction.steps
-            ):
-
-                if hasattr(
-                    step,
-                    "content"
-                ):
-
-                    content = step.content
-
-                    if isinstance(
-                        content,
-                        list
-                    ):
-
-                        for item in content:
-
-                            if (
-                                hasattr(
-                                    item,
-                                    "text"
-                                )
-                                and item.text
-                            ):
-
-                                return item.text
+            return interaction.output_text
 
         return (
             "Gemini không trả về nội dung."
         )
 
-    except Exception as e:
+    except Exception as exc:
 
         return (
             "❌ GEMINI ERROR\n\n"
-            f"{str(e)}"
+            f"{exc}"
         )
 
 
 # ============================================================
-# NÚT PHÂN TÍCH
+# CANDLESTICK CHART
+# ============================================================
+
+def build_candlestick_chart(df, symbol_label):
+
+    plot_df = df.tail(150).copy()
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.72, 0.28]
+    )
+
+    # Candles
+    fig.add_trace(
+        go.Candlestick(
+            x=plot_df["open_time"],
+            open=plot_df["open"],
+            high=plot_df["high"],
+            low=plot_df["low"],
+            close=plot_df["close"],
+            name="Nến"
+        ),
+        row=1,
+        col=1
+    )
+
+    # EMA20
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["open_time"],
+            y=plot_df["ema20"],
+            mode="lines",
+            name="EMA20"
+        ),
+        row=1,
+        col=1
+    )
+
+    # EMA50
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["open_time"],
+            y=plot_df["ema50"],
+            mode="lines",
+            name="EMA50"
+        ),
+        row=1,
+        col=1
+    )
+
+    # Volume
+    fig.add_trace(
+        go.Bar(
+            x=plot_df["open_time"],
+            y=plot_df["volume"],
+            name="Volume"
+        ),
+        row=2,
+        col=1
+    )
+
+    fig.update_layout(
+        title=f"{symbol_label} — Biểu đồ nến",
+        height=650,
+        xaxis_rangeslider_visible=False,
+        margin=dict(
+            l=10,
+            r=10,
+            t=50,
+            b=10
+        )
+    )
+
+    fig.update_yaxes(
+        title_text="Giá",
+        row=1,
+        col=1
+    )
+
+    fig.update_yaxes(
+        title_text="Volume",
+        row=2,
+        col=1
+    )
+
+    return fig
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 if st.button(
-    "🚀 PHÂN TÍCH CLUSDT",
+    "🚀 PHÂN TÍCH DẦU",
     type="primary",
     use_container_width=True
 ):
 
     # ========================================================
-    # KIỂM TRA GEMINI KEY
+    # API KEY
     # ========================================================
 
-    if not api_key:
+    if not api_key.strip():
 
         st.error(
             "⚠️ Bạn chưa nhập Gemini API Key."
@@ -1068,133 +905,130 @@ if st.button(
 
         st.stop()
 
-    api_key = api_key.strip()
-
     # ========================================================
-    # 1. BINANCE KLINE
+    # STEP 1: BINANCE
     # ========================================================
 
     with st.spinner(
-        "1/5: Đang tải dữ liệu Binance CLUSDT..."
+        "1/5: Đang kết nối Binance Futures..."
     ):
 
-        df, error = get_binance_klines(
-            SYMBOL,
-            interval,
-            kline_limit
+        binance_df, active_endpoint, binance_error = (
+            get_binance_klines(
+                BINANCE_SYMBOL,
+                interval,
+                limit
+            )
         )
 
-    if df is None:
-
-        st.error(error)
-        st.stop()
-
-    # ========================================================
-    # LẤY GIÁ
-    # ========================================================
-
-    last = df.iloc[-1]
-
-    price = float(
-        last["Close"]
-    )
-
-    rsi = float(
-        last["RSI"]
-    )
-
-    macd = float(
-        last["MACD"]
-    )
-
-    signal = float(
-        last["Signal"]
-    )
-
-    volume = float(
-        last["Volume"]
-    )
-
-    ema20 = float(
-        last["EMA20"]
-    )
-
-    ema50 = float(
-        last["EMA50"]
-    )
+    source_name = ""
+    funding_rate = None
+    open_interest = None
 
     # ========================================================
-    # TECHNICAL SIGNAL
+    # BINANCE SUCCESS
     # ========================================================
 
-    (
-        technical_direction,
-        technical_score,
-        technical_reasons
-    ) = technical_signal(
-        rsi,
-        macd,
-        signal,
-        price,
-        ema20,
-        ema50
-    )
+    if binance_df is not None:
 
-    # ========================================================
-    # 2. FUNDING
-    # ========================================================
-
-    with st.spinner(
-        "2/5: Đang lấy Funding Rate..."
-    ):
-
-        funding_data, _ = (
-            get_funding_rate()
+        source_name = (
+            f"Binance Futures {BINANCE_SYMBOL}"
+            f" — {active_endpoint}"
         )
 
-    if funding_data:
+        df = binance_df
 
-        funding_rate = float(
-            funding_data["rate"]
+        # Funding
+        funding_data, _, _ = get_binance_funding(
+            BINANCE_SYMBOL
         )
+
+        if funding_data:
+            funding_rate = funding_data["rate"]
+
+        # OI
+        open_interest, _, _ = get_binance_open_interest(
+            BINANCE_SYMBOL
+        )
+
+        st.success(
+            f"✅ Đang dùng dữ liệu Binance Futures "
+            f"từ {active_endpoint}"
+        )
+
+    # ========================================================
+    # BINANCE FAILED → FALLBACK
+    # ========================================================
 
     else:
 
-        funding_rate = 0.0
+        st.warning(
+            "⚠️ Binance Futures không truy cập được từ "
+            "máy chủ Streamlit Cloud."
+        )
+
+        with st.expander(
+            "Xem lỗi Binance"
+        ):
+            st.code(
+                str(binance_error)
+            )
+
+        with st.spinner(
+            "Đang chuyển sang dữ liệu WTI dự phòng..."
+        ):
+
+            fallback_df, fallback_error = (
+                get_yahoo_fallback(
+                    interval,
+                    limit
+                )
+            )
+
+        if fallback_df is None:
+
+            st.error(
+                "❌ Binance và nguồn dự phòng đều lỗi.\n\n"
+                f"Yahoo: {fallback_error}\n\n"
+                "Bạn có thể cần đổi nơi deploy app "
+                "sang server có quyền truy cập Binance."
+            )
+
+            st.stop()
+
+        df = fallback_df
+
+        source_name = (
+            "Yahoo Finance WTI Futures (CL=F) — FALLBACK"
+        )
+
+        st.warning(
+            "🟡 FALLBACK: Đang dùng WTI Futures từ Yahoo Finance. "
+            "Đây KHÔNG phải dữ liệu CLUSDT Binance."
+        )
 
     # ========================================================
-    # 3. OPEN INTEREST
+    # INDICATORS
     # ========================================================
 
     with st.spinner(
-        "3/5: Đang lấy Open Interest..."
+        "2/5: Đang tính RSI, MACD và EMA..."
     ):
 
-        open_interest, _ = (
-            get_open_interest()
+        df = add_indicators(
+            df
         )
 
-    if open_interest is None:
-
-        open_interest = 0.0
-
-    # ========================================================
-    # LONG SHORT
-    # ========================================================
-
-    long_short, _ = (
-        get_long_short_ratio(
-            SYMBOL,
-            "1h"
+        technical = get_technical_summary(
+            df
         )
-    )
 
     # ========================================================
-    # 4. NEWS
+    # NEWS
     # ========================================================
 
     with st.spinner(
-        "4/5: Đang quét tin tức dầu mỏ..."
+        "3/5: Đang thu thập tin tức dầu mỏ..."
     ):
 
         news = get_global_news()
@@ -1204,106 +1038,105 @@ if st.button(
     # ========================================================
 
     st.subheader(
-        "📊 BINANCE CLUSDT"
+        "📊 Tổng quan"
     )
 
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
+    c1, c2, c3, c4 = st.columns(4)
 
-    col1.metric(
+    c1.metric(
         "💵 Giá",
-        f"${price:.2f}"
+        f"${technical['price']:.2f}"
     )
 
-    col2.metric(
+    c2.metric(
         "RSI",
-        f"{rsi:.2f}"
+        f"{technical['rsi']:.2f}"
     )
 
-    col3.metric(
+    c3.metric(
         "MACD",
-        "🟢 Tăng"
-        if macd > signal
-        else "🔴 Giảm"
+        (
+            "🟢 Tăng"
+            if technical["macd"] >
+            technical["signal"]
+            else "🔴 Giảm"
+        )
     )
 
-    col4.metric(
-        "Kỹ thuật",
-        technical_direction
+    c4.metric(
+        "Xu hướng kỹ thuật",
+        technical["direction"]
     )
 
     # ========================================================
-    # FUTURES DATA
+    # FUTURES
+    # ========================================================
+
+    if active_endpoint is not None:
+
+        st.subheader(
+            "📡 Binance Futures"
+        )
+
+        f1, f2, f3 = st.columns(3)
+
+        if funding_rate is not None:
+
+            f1.metric(
+                "Funding Rate",
+                f"{funding_rate * 100:.4f}%"
+            )
+
+        else:
+
+            f1.metric(
+                "Funding Rate",
+                "N/A"
+            )
+
+        if open_interest is not None:
+
+            f2.metric(
+                "Open Interest",
+                f"{open_interest:,.2f}"
+            )
+
+        else:
+
+            f2.metric(
+                "Open Interest",
+                "N/A"
+            )
+
+        f3.metric(
+            "Nguồn",
+            "CLUSDT"
+        )
+
+    # ========================================================
+    # CANDLESTICK
     # ========================================================
 
     st.subheader(
-        "📡 Binance Futures"
+        "🕯️ Biểu đồ nến"
     )
 
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
-
-    col1.metric(
-        "Funding Rate",
-        f"{funding_rate * 100:.4f}%"
-    )
-
-    col2.metric(
-        "Open Interest",
-        f"{open_interest:,.2f}"
-    )
-
-    if long_short:
-
-        col3.metric(
-            "Long",
-            f"{long_short['long']:.2f}%"
+    fig = build_candlestick_chart(
+        df,
+        (
+            "CLUSDT"
+            if active_endpoint
+            else "WTI CL=F (Fallback)"
         )
-
-        col4.metric(
-            "Short",
-            f"{long_short['short']:.2f}%"
-        )
-
-    else:
-
-        col3.metric(
-            "Long",
-            "N/A"
-        )
-
-        col4.metric(
-            "Short",
-            "N/A"
-        )
-
-    # ========================================================
-    # BIỂU ĐỒ GIÁ
-    # ========================================================
-
-    st.subheader(
-        f"📈 CLUSDT - {interval}"
     )
 
-    chart = df[
-        [
-            "Close",
-            "EMA20",
-            "EMA50"
-        ]
-    ].copy()
-
-    chart.columns = [
-        "Giá",
-        "EMA20",
-        "EMA50"
-    ]
-
-    st.line_chart(
-        chart,
-        height=400
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displaylogo": False,
+            "scrollZoom": True
+        }
     )
 
     # ========================================================
@@ -1311,14 +1144,44 @@ if st.button(
     # ========================================================
 
     st.subheader(
-        "📊 RSI"
+        "📈 RSI"
     )
 
-    st.line_chart(
-        df[
-            ["RSI"]
-        ],
-        height=250
+    rsi_fig = go.Figure()
+
+    rsi_fig.add_trace(
+        go.Scatter(
+            x=df["open_time"],
+            y=df["rsi"],
+            mode="lines",
+            name="RSI"
+        )
+    )
+
+    rsi_fig.add_hline(
+        y=70,
+        line_dash="dash"
+    )
+
+    rsi_fig.add_hline(
+        y=30,
+        line_dash="dash"
+    )
+
+    rsi_fig.update_layout(
+        height=300,
+        margin=dict(
+            l=10,
+            r=10,
+            t=20,
+            b=10
+        )
+    )
+
+    st.plotly_chart(
+        rsi_fig,
+        use_container_width=True,
+        config={"displaylogo": False}
     )
 
     # ========================================================
@@ -1329,16 +1192,40 @@ if st.button(
         "📉 MACD"
     )
 
-    macd_chart = df[
-        [
-            "MACD",
-            "Signal"
-        ]
-    ].copy()
+    macd_fig = go.Figure()
 
-    st.line_chart(
-        macd_chart,
-        height=250
+    macd_fig.add_trace(
+        go.Scatter(
+            x=df["open_time"],
+            y=df["macd"],
+            mode="lines",
+            name="MACD"
+        )
+    )
+
+    macd_fig.add_trace(
+        go.Scatter(
+            x=df["open_time"],
+            y=df["signal"],
+            mode="lines",
+            name="Signal"
+        )
+    )
+
+    macd_fig.update_layout(
+        height=300,
+        margin=dict(
+            l=10,
+            r=10,
+            t=20,
+            b=10
+        )
+    )
+
+    st.plotly_chart(
+        macd_fig,
+        use_container_width=True,
+        config={"displaylogo": False}
     )
 
     # ========================================================
@@ -1346,41 +1233,31 @@ if st.button(
     # ========================================================
 
     st.subheader(
-        "🧠 Phân tích kỹ thuật tự động"
+        "🧠 Tín hiệu kỹ thuật"
     )
 
-    for reason in technical_reasons:
+    for reason in technical["reasons"]:
 
         st.write(
             "• " + reason
         )
 
     # ========================================================
-    # 5. GEMINI
+    # AI
     # ========================================================
 
     with st.spinner(
-        "5/5: Gemini đang tổng hợp toàn bộ dữ liệu..."
+        "4/5: Gemini đang phân tích toàn bộ dữ liệu..."
     ):
 
-        analysis = ai_analyze_market(
+        analysis = ai_analyze(
+            api_key=api_key.strip(),
             news=news,
-            price=price,
-            rsi=rsi,
-            macd=macd,
-            signal=signal,
-            volume=volume,
+            technical=technical,
             funding_rate=funding_rate,
             open_interest=open_interest,
-            long_short=long_short,
-            technical_direction=technical_direction,
-            technical_score=technical_score,
-            api_key=api_key
+            source_name=source_name
         )
-
-    # ========================================================
-    # AI RESULT
-    # ========================================================
 
     st.subheader(
         "🤖 Báo cáo AI"
@@ -1399,7 +1276,7 @@ if st.button(
     )
 
     with st.expander(
-        "Xem tin tức"
+        "Xem các tin tức đã thu thập"
     ):
 
         for i, item in enumerate(
@@ -1412,21 +1289,16 @@ if st.button(
             )
 
     # ========================================================
-    # FOOTER
+    # STATUS
     # ========================================================
 
     st.markdown("---")
 
-    now = datetime.now(
-        timezone.utc
+    st.caption(
+        f"Nguồn dữ liệu: {source_name}"
     )
 
     st.caption(
-        f"""
-        Binance Futures: {SYMBOL} |
-        Khung: {interval} |
-        Cập nhật: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}
-
-        ⚠️ Công cụ phân tích tham khảo, không phải lời khuyên đầu tư.
-        """
+        "⚠️ Hệ thống chỉ cung cấp phân tích tham khảo, "
+        "không phải lời khuyên đầu tư."
     )
