@@ -1,12 +1,7 @@
-import io
-import zipfile
-from datetime import datetime, timedelta, timezone
-
-import pandas as pd
-import requests
 import streamlit as st
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import streamlit.components.v1 as components
+import yfinance as yf
+import pandas as pd
 from ddgs import DDGS
 from google import genai
 
@@ -16,26 +11,16 @@ from google import genai
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Phân tích Dầu CLUSDT",
+    page_title="AI Phân tích Dầu TradingView",
     page_icon="🛢️",
-    layout="wide",
+    layout="wide"
 )
 
-SYMBOL = "CLUSDT"
-
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
-COINGECKO_PRO_BASE = "https://pro-api.coingecko.com/api/v3"
-
-BINANCE_DATA_BASE = "https://data.binance.vision"
-
-st.title("🛢️ AI Phân tích Giá Dầu CLUSDT")
+st.title("🛢️ AI Phân tích Giá Dầu WTI")
 st.markdown(
     """
-    Phân tích WTI trên Binance Futures bằng:
-    **CoinGecko → giá/Funding/Open Interest/Volume**
-    + **Binance Public Data → nến lịch sử**
-    + **RSI / MACD / EMA**
-    + **Tin tức + Gemini AI**
+    Biểu đồ giá dầu trực tiếp từ **TradingView**,
+    kết hợp RSI, MACD, EMA, tin tức vĩ mô và Gemini AI.
     """
 )
 
@@ -49,608 +34,276 @@ st.sidebar.header("⚙️ Cấu hình")
 gemini_api_key = st.sidebar.text_input(
     "🔑 Gemini API Key",
     type="password",
-    placeholder="Dán Gemini API Key",
-)
-
-coingecko_api_key = st.sidebar.text_input(
-    "🦎 CoinGecko API Key",
-    type="password",
-    placeholder="Có thể để trống nếu endpoint public hoạt động",
+    placeholder="Dán Gemini API Key"
 )
 
 st.sidebar.markdown(
-    "[👉 CoinGecko API](https://www.coingecko.com/api)"
+    "[👉 Lấy Gemini API Key]"
+    "(https://aistudio.google.com/apikey)"
 )
 
-st.sidebar.markdown(
-    "[👉 Gemini API](https://aistudio.google.com/apikey)"
+tradingview_symbol = st.sidebar.selectbox(
+    "🛢️ Mã dầu trên TradingView",
+    [
+        "TVC:USOIL",
+        "NYMEX:CL1!"
+    ],
+    index=0
 )
-
-st.sidebar.markdown("---")
 
 interval = st.sidebar.selectbox(
     "⏱️ Khung thời gian",
-    ["5m", "15m", "30m", "1h", "4h", "1d"],
-    index=3,
+    [
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "4h",
+        "1d"
+    ],
+    index=3
 )
 
-limit = st.sidebar.selectbox(
-    "📊 Số nến",
-    [100, 200, 300, 500],
-    index=1,
+period = st.sidebar.selectbox(
+    "📊 Lịch sử phân tích",
+    [
+        "1mo",
+        "3mo",
+        "6mo",
+        "1y",
+        "2y"
+    ],
+    index=2
 )
 
 st.sidebar.markdown("---")
 
 st.sidebar.info(
     """
-    Symbol: **CLUSDT**
+    **TradingView**
     
-    Binance Futures:
-    **WTI Crude Oil**
+    Biểu đồ: TradingView
     
-    CoinGecko:
-    dữ liệu Futures trung gian.
+    Technical:
+    RSI + MACD + EMA
+    
+    AI:
+    Google Gemini
     """
 )
 
 st.sidebar.caption(
-    "⚠️ Chỉ dùng để tham khảo, không phải lời khuyên đầu tư."
+    "⚠️ Công cụ chỉ mang tính tham khảo, "
+    "không phải lời khuyên đầu tư."
 )
 
 
 # ============================================================
-# HTTP SESSION
+# TRADINGVIEW EMBED
 # ============================================================
 
-@st.cache_resource
-def get_session():
-    session = requests.Session()
-
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/140 Safari/537.36"
-            ),
-            "Accept": "application/json",
-        }
-    )
-
-    return session
-
-
-SESSION = get_session()
-
-
-# ============================================================
-# COINGECKO REQUEST
-# ============================================================
-
-def coingecko_get(
-    path,
-    params=None,
-):
+def tradingview_chart(symbol, tv_interval):
     """
-    Ưu tiên Pro API nếu có API key.
-    Nếu không có, thử public API.
+    Nhúng TradingView Advanced Chart Widget.
+
+    TradingView cung cấp widget/chart cho việc hiển thị
+    thị trường. Dữ liệu biểu đồ do TradingView cung cấp
+    trong widget.
     """
 
-    headers = {}
-
-    if coingecko_api_key.strip():
-        base_url = COINGECKO_PRO_BASE
-        headers["x-cg-pro-api-key"] = (
-            coingecko_api_key.strip()
-        )
-    else:
-        base_url = COINGECKO_BASE
-
-    try:
-
-        response = SESSION.get(
-            base_url + path,
-            params=params or {},
-            headers=headers,
-            timeout=20,
-        )
-
-        if response.status_code == 200:
-            return response.json(), None
-
-        return None, (
-            f"CoinGecko HTTP {response.status_code}: "
-            f"{response.text[:500]}"
-        )
-
-    except Exception as exc:
-
-        return None, (
-            f"Lỗi CoinGecko: {exc}"
-        )
-
-
-# ============================================================
-# TÌM CLUSDT TRÊN BINANCE FUTURES COINGECKO
-# ============================================================
-
-def get_clusdt_from_coingecko():
-    """
-    Lấy dữ liệu derivatives của CLUSDT.
-
-    CoinGecko trả:
-    - price
-    - index
-    - basis
-    - funding_rate
-    - open_interest
-    - volume_24h
-    - last_traded_at
-    """
-
-    # Cách 1: derivatives/exchanges/binance_futures
-    data, error = coingecko_get(
-        "/derivatives/exchanges/binance_futures",
-        {
-            "include_tickers": "all",
-        },
-    )
-
-    if data is not None:
-
-        tickers = data.get(
-            "tickers",
-            [],
-        )
-
-        for ticker in tickers:
-
-            symbol = str(
-                ticker.get("symbol", "")
-            ).upper()
-
-            if symbol == SYMBOL:
-
-                return {
-                    "symbol": symbol,
-                    "market": "Binance (Futures)",
-                    "price": safe_number(
-                        ticker.get("last")
-                    ),
-                    "index": safe_number(
-                        ticker.get("index")
-                    ),
-                    "basis": safe_number(
-                        ticker.get(
-                            "index_basis_percentage"
-                        )
-                    ),
-                    "funding_rate": safe_number(
-                        ticker.get("funding_rate")
-                    ),
-                    "open_interest": safe_number(
-                        ticker.get(
-                            "open_interest_usd"
-                        )
-                    ),
-                    "volume_24h": safe_number(
-                        ticker.get(
-                            "h24_volume"
-                        )
-                    ),
-                    "last_traded": ticker.get(
-                        "last_traded"
-                    ),
-                    "trade_url": ticker.get(
-                        "trade_url"
-                    ),
-                }, None
-
-    # Cách 2: /derivatives
-    data2, error2 = coingecko_get(
-        "/derivatives",
-    )
-
-    if data2 is not None:
-
-        for ticker in data2:
-
-            if (
-                str(
-                    ticker.get("market", "")
-                ).lower()
-                .startswith("binance")
-            ):
-
-                symbol = str(
-                    ticker.get("symbol", "")
-                ).upper()
-
-                if symbol == SYMBOL:
-
-                    return {
-                        "symbol": symbol,
-                        "market": ticker.get(
-                            "market",
-                            "Binance (Futures)",
-                        ),
-                        "price": safe_number(
-                            ticker.get("price")
-                        ),
-                        "index": safe_number(
-                            ticker.get("index")
-                        ),
-                        "basis": safe_number(
-                            ticker.get("basis")
-                        ),
-                        "funding_rate": safe_number(
-                            ticker.get(
-                                "funding_rate"
-                            )
-                        ),
-                        "open_interest": safe_number(
-                            ticker.get(
-                                "open_interest"
-                            )
-                        ),
-                        "volume_24h": safe_number(
-                            ticker.get(
-                                "volume_24h"
-                            )
-                        ),
-                        "last_traded": ticker.get(
-                            "last_traded_at"
-                        ),
-                        "trade_url": None,
-                    }, None
-
-    return None, (
-        error
-        or error2
-        or "Không tìm thấy CLUSDT trên CoinGecko."
-    )
-
-
-# ============================================================
-# SAFE NUMBER
-# ============================================================
-
-def safe_number(value):
-    try:
-
-        if value is None:
-            return None
-
-        if isinstance(
-            value,
-            str,
-        ):
-            value = value.replace(
-                ",",
-                "",
-            )
-
-        number = float(value)
-
-        if pd.isna(number):
-            return None
-
-        return number
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# BINANCE PUBLIC DATA ARCHIVE
-# ============================================================
-
-def get_archive_url(
-    symbol,
-    interval_name,
-    date_obj,
-):
-    date_text = (
-        date_obj.strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    return (
-        f"{BINANCE_DATA_BASE}/data/futures/um/daily/"
-        f"klines/{symbol}/{interval_name}/"
-        f"{symbol}-{interval_name}-{date_text}.zip"
-    )
-
-
-# ============================================================
-# TẢI 1 NGÀY NẾN
-# ============================================================
-
-def download_archive_day(
-    symbol,
-    interval_name,
-    date_obj,
-):
-
-    url = get_archive_url(
-        symbol,
-        interval_name,
-        date_obj,
-    )
-
-    try:
-
-        response = SESSION.get(
-            url,
-            timeout=20,
-        )
-
-        if response.status_code != 200:
-            return None, (
-                f"HTTP {response.status_code}"
-            )
-
-        if not response.content:
-            return None, "File rỗng."
-
-        with zipfile.ZipFile(
-            io.BytesIO(
-                response.content
-            )
-        ) as archive:
-
-            csv_files = [
-                x
-                for x in archive.namelist()
-                if x.endswith(".csv")
-            ]
-
-            if not csv_files:
-                return None, (
-                    "ZIP không chứa CSV."
-                )
-
-            with archive.open(
-                csv_files[0]
-            ) as csv_file:
-
-                data = pd.read_csv(
-                    csv_file,
-                    header=None,
-                )
-
-        if data.empty:
-            return None, "CSV rỗng."
-
-        # Binance Kline CSV
-        data = data.iloc[:, :12]
-
-        data.columns = [
-            "open_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "close_time",
-            "quote_volume",
-            "trades",
-            "taker_buy_base",
-            "taker_buy_quote",
-            "ignore",
-        ]
-
-        # Nếu archive có header
-        first_cell = str(
-            data.iloc[0, 0]
-        ).lower()
-
-        if "open_time" in first_cell:
-
-            data = data.iloc[1:].copy()
-
-        numeric_cols = [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "quote_volume",
-            "trades",
-            "taker_buy_base",
-            "taker_buy_quote",
-        ]
-
-        for col in numeric_cols:
-
-            data[col] = pd.to_numeric(
-                data[col],
-                errors="coerce",
-            )
-
-        data["open_time"] = pd.to_datetime(
-            data["open_time"],
-            unit="ms",
-            utc=True,
-            errors="coerce",
-        )
-
-        data = data.dropna(
-            subset=[
-                "open_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-            ]
-        )
-
-        return data, None
-
-    except Exception as exc:
-
-        return None, str(exc)
-
-
-# ============================================================
-# LẤY LỊCH SỬ NẾN
-# ============================================================
-
-def get_binance_candles(
-    interval_name,
-    limit_count,
-):
-    """
-    Không dùng fapi.binance.com.
-
-    Lấy từ Binance Public Data Archive.
-    """
-
-    source_interval = interval_name
-
-    # 4h: lấy 1h rồi resample
-    if interval_name == "4h":
-        source_interval = "1h"
-
-    bars_per_day = {
-        "5m": 288,
-        "15m": 96,
-        "30m": 48,
-        "1h": 24,
-        "1d": 1,
+    interval_map = {
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "4h": "240",
+        "1d": "D"
     }
 
-    estimated_days = int(
-        limit_count /
-        bars_per_day[source_interval]
-    ) + 2
-
-    estimated_days = max(
-        2,
-        estimated_days,
+    tv_interval = interval_map.get(
+        tv_interval,
+        "60"
     )
 
-    estimated_days = min(
-        estimated_days,
-        14,
+    html = f"""
+    <div class="tradingview-widget-container"
+         style="width:100%; height:650px;">
+      <div id="tradingview_chart"
+           style="width:100%; height:650px;">
+      </div>
+
+      <script
+        type="text/javascript"
+        src="https://s3.tradingview.com/tv.js">
+      </script>
+
+      <script type="text/javascript">
+
+      new TradingView.widget({{
+          "autosize": true,
+          "symbol": "{symbol}",
+          "interval": "{tv_interval}",
+          "timezone": "Asia/Bangkok",
+          "theme": "dark",
+          "style": "1",
+          "locale": "vi_VN",
+          "toolbar_bg": "#111827",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "save_image": true,
+          "container_id": "tradingview_chart",
+          "studies": [
+              "RSI@tv-basicstudies",
+              "MACD@tv-basicstudies"
+          ]
+      }});
+
+      </script>
+    </div>
+    """
+
+    components.html(
+        html,
+        height=680,
+        scrolling=False
     )
 
-    today = datetime.now(
-        timezone.utc
-    ).date()
 
-    frames = []
+# ============================================================
+# YAHOO DATA FOR TECHNICAL CALCULATIONS
+# ============================================================
 
-    for offset in range(
-        estimated_days + 3
-    ):
+def get_market_data(
+    period_value,
+    interval_value
+):
 
-        date_obj = (
-            today -
-            timedelta(
-                days=offset
+    # TradingView 4h không có interval tương ứng
+    # nên dùng 1h rồi resample.
+    source_interval = interval_value
+
+    if interval_value == "4h":
+        source_interval = "1h"
+
+    try:
+
+        df = yf.download(
+            "CL=F",
+            period=period_value,
+            interval=source_interval,
+            auto_adjust=False,
+            progress=False
+        )
+
+        if df is None or df.empty:
+            return None, (
+                "Không lấy được dữ liệu WTI."
             )
-        )
 
-        frame, error = (
-            download_archive_day(
-                SYMBOL,
-                source_interval,
-                date_obj,
-            )
-        )
+        # ----------------------------------------------------
+        # MultiIndex
+        # ----------------------------------------------------
 
-        if frame is not None:
-            frames.append(frame)
-
-        total_rows = sum(
-            len(x)
-            for x in frames
-        )
-
-        if total_rows >= (
-            limit_count + 50
+        if isinstance(
+            df.columns,
+            pd.MultiIndex
         ):
-            break
 
-    if not frames:
-
-        return None, (
-            "Không thể lấy nến CLUSDT "
-            "từ Binance Public Data Archive."
-        )
-
-    df = pd.concat(
-        frames,
-        ignore_index=True,
-    )
-
-    df = (
-        df.sort_values(
-            "open_time"
-        )
-        .drop_duplicates(
-            "open_time"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    # 4h
-    if interval_name == "4h":
-
-        df = (
-            df.set_index(
-                "open_time"
+            df.columns = (
+                df.columns
+                .get_level_values(0)
             )
-            .resample("4h")
-            .agg(
-                {
+
+        df.columns = [
+            str(col).lower()
+            for col in df.columns
+        ]
+
+        required = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+
+        if not all(
+            col in df.columns
+            for col in required
+        ):
+
+            return None, (
+                "Yahoo Finance thiếu dữ liệu OHLC."
+            )
+
+        df = df[
+            required
+        ].copy()
+
+        for col in required:
+
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+        df = df.dropna()
+
+        # ----------------------------------------------------
+        # 4H
+        # ----------------------------------------------------
+
+        if interval_value == "4h":
+
+            df = (
+                df.resample("4h")
+                .agg({
                     "open": "first",
                     "high": "max",
                     "low": "min",
                     "close": "last",
-                    "volume": "sum",
-                }
+                    "volume": "sum"
+                })
+                .dropna()
             )
-            .dropna()
-            .reset_index()
+
+        df = df.tail(300)
+
+        if len(df) < 50:
+
+            return None, (
+                "Không đủ dữ liệu để tính chỉ báo."
+            )
+
+        df.index = pd.to_datetime(
+            df.index,
+            utc=True
         )
 
-    df = df.tail(
-        limit_count
-    )
+        return df, None
 
-    if len(df) < 30:
+    except Exception as exc:
 
         return None, (
-            f"Chỉ lấy được {len(df)} nến."
+            f"Lỗi lấy dữ liệu dầu: {exc}"
         )
 
-    return df, None
-
 
 # ============================================================
-# INDICATORS
+# TECHNICAL INDICATORS
 # ============================================================
 
-def add_indicators(
-    df,
-):
+def add_indicators(df):
 
     df = df.copy()
 
+    # --------------------------------------------------------
     # RSI
-    delta = (
-        df["close"]
-        .diff()
-    )
+    # --------------------------------------------------------
+
+    delta = df["close"].diff()
 
     gain = delta.clip(
         lower=0
@@ -661,18 +314,18 @@ def add_indicators(
     )
 
     avg_gain = gain.rolling(
-        14,
-        min_periods=14,
+        window=14,
+        min_periods=14
     ).mean()
 
     avg_loss = loss.rolling(
-        14,
-        min_periods=14,
+        window=14,
+        min_periods=14
     ).mean()
 
     avg_loss = avg_loss.replace(
         0,
-        pd.NA,
+        pd.NA
     )
 
     rs = (
@@ -684,23 +337,21 @@ def add_indicators(
         100 -
         (
             100 /
-            (
-                1 + rs
-            )
+            (1 + rs)
         )
     )
 
-    df["rsi"] = (
-        df["rsi"]
-        .fillna(50)
-    )
+    df["rsi"] = df["rsi"].fillna(50)
 
+    # --------------------------------------------------------
     # EMA
+    # --------------------------------------------------------
+
     df["ema20"] = (
         df["close"]
         .ewm(
             span=20,
-            adjust=False,
+            adjust=False
         )
         .mean()
     )
@@ -709,17 +360,20 @@ def add_indicators(
         df["close"]
         .ewm(
             span=50,
-            adjust=False,
+            adjust=False
         )
         .mean()
     )
 
+    # --------------------------------------------------------
     # MACD
+    # --------------------------------------------------------
+
     ema12 = (
         df["close"]
         .ewm(
             span=12,
-            adjust=False,
+            adjust=False
         )
         .mean()
     )
@@ -728,7 +382,7 @@ def add_indicators(
         df["close"]
         .ewm(
             span=26,
-            adjust=False,
+            adjust=False
         )
         .mean()
     )
@@ -742,7 +396,7 @@ def add_indicators(
         df["macd"]
         .ewm(
             span=9,
-            adjust=False,
+            adjust=False
         )
         .mean()
     )
@@ -756,12 +410,10 @@ def add_indicators(
 
 
 # ============================================================
-# TECHNICAL SCORE
+# TECHNICAL ANALYSIS
 # ============================================================
 
-def technical_analysis(
-    df,
-):
+def technical_analysis(df):
 
     last = df.iloc[-1]
 
@@ -906,7 +558,7 @@ def technical_analysis(
         "ema50": ema50,
         "score": score,
         "direction": direction,
-        "reasons": reasons,
+        "reasons": reasons
     }
 
 
@@ -914,8 +566,8 @@ def technical_analysis(
 # NEWS
 # ============================================================
 
-def get_news(
-    max_results=15,
+def get_global_news(
+    max_results=15
 ):
 
     queries = [
@@ -926,7 +578,7 @@ def get_news(
         "WTI oil price",
     ]
 
-    all_news = []
+    news = []
 
     try:
 
@@ -938,7 +590,7 @@ def get_news(
 
                     results = ddgs.news(
                         query=query,
-                        max_results=4,
+                        max_results=4
                     )
 
                     for item in results:
@@ -949,33 +601,34 @@ def get_news(
 
                         if title:
 
-                            all_news.append(
+                            news.append(
                                 title.strip()
                             )
 
                 except Exception:
+
                     continue
 
-        unique_news = list(
+        news = list(
             dict.fromkeys(
-                all_news
+                news
             )
         )
 
-        if not unique_news:
+        if not news:
 
             return [
-                "Không lấy được tin tức mới."
+                "Không lấy được tin tức."
             ]
 
-        return unique_news[
+        return news[
             :max_results
         ]
 
     except Exception as exc:
 
         return [
-            f"Không thể lấy tin tức: {exc}"
+            f"Lỗi tin tức: {exc}"
         ]
 
 
@@ -985,10 +638,9 @@ def get_news(
 
 def analyze_with_gemini(
     api_key,
-    ticker,
+    symbol,
     technical,
-    futures,
-    news,
+    news
 ):
 
     try:
@@ -997,83 +649,21 @@ def analyze_with_gemini(
             api_key=api_key
         )
 
-        funding = futures.get(
-            "funding_rate"
-        )
-
-        oi = futures.get(
-            "open_interest"
-        )
-
-        volume = futures.get(
-            "volume_24h"
-        )
-
-        index_price = futures.get(
-            "index"
-        )
-
-        basis = futures.get(
-            "basis"
-        )
-
-        if funding is None:
-            funding_text = "Không có dữ liệu"
-        else:
-            funding_text = (
-                f"{funding * 100:.4f}%"
-            )
-
-        if oi is None:
-            oi_text = "Không có dữ liệu"
-        else:
-            oi_text = (
-                f"${oi:,.0f}"
-            )
-
-        if volume is None:
-            volume_text = "Không có dữ liệu"
-        else:
-            volume_text = (
-                f"${volume:,.0f}"
-            )
-
-        if index_price is None:
-            index_text = "Không có dữ liệu"
-        else:
-            index_text = (
-                f"${index_price:.2f}"
-            )
-
-        if basis is None:
-            basis_text = "Không có dữ liệu"
-        else:
-            basis_text = (
-                f"{basis:.4f}%"
-            )
-
         news_text = "\n".join(
-            f"- {x}"
-            for x in news
+            f"- {item}"
+            for item in news
         )
 
         prompt = f"""
-Bạn là chuyên gia phân tích dầu WTI
-trên Binance Futures.
+Bạn là chuyên gia phân tích WTI Crude Oil.
 
-Dữ liệu Futures hiện tại lấy qua CoinGecko.
+Biểu đồ tham chiếu:
+{symbol}
 
-SYMBOL:
-{ticker}
+Dữ liệu OHLC dùng cho chỉ báo:
 
-GIÁ:
+Giá:
 ${technical['price']:.2f}
-
-INDEX PRICE:
-{index_text}
-
-BASIS:
-{basis_text}
 
 RSI:
 {technical['rsi']:.2f}
@@ -1081,7 +671,7 @@ RSI:
 MACD:
 {technical['macd']:.4f}
 
-SIGNAL:
+Signal:
 {technical['signal']:.4f}
 
 EMA20:
@@ -1090,27 +680,18 @@ ${technical['ema20']:.2f}
 EMA50:
 ${technical['ema50']:.2f}
 
-ĐIỂM KỸ THUẬT:
+Điểm kỹ thuật:
 {technical['score']}
 
-XU HƯỚNG:
+Xu hướng:
 {technical['direction']}
 
-FUNDING RATE:
-{funding_text}
-
-OPEN INTEREST:
-{oi_text}
-
-VOLUME 24H:
-{volume_text}
-
-TIN TỨC:
+Tin tức:
 {news_text}
 
-Hãy trả lời bằng tiếng Việt.
+Hãy phân tích bằng tiếng Việt.
 
-Cấu trúc:
+CẤU TRÚC:
 
 🎯 TÍN HIỆU
 LONG / SHORT / WAIT
@@ -1119,11 +700,7 @@ LONG / SHORT / WAIT
 Tăng / Giảm / Đi ngang
 
 📊 KỸ THUẬT
-Phân tích RSI, MACD, EMA20 và EMA50.
-
-💰 FUTURES SENTIMENT
-Phân tích Funding Rate,
-Open Interest và Volume.
+Phân tích RSI, MACD, EMA20, EMA50.
 
 📰 VĨ MÔ
 Phân tích OPEC, cung cầu,
@@ -1131,25 +708,24 @@ tồn kho và địa chính trị.
 
 💡 KỊCH BẢN
 LONG:
-Điều kiện.
+Điều kiện thuận lợi.
 
 SHORT:
-Điều kiện.
+Điều kiện thuận lợi.
 
 WAIT:
-Điều kiện.
+Điều kiện nên đứng ngoài.
 
 ⚠️ RỦI RO
-Những yếu tố có thể làm tín hiệu sai.
+Các yếu tố có thể làm nhận định sai.
 
 QUY TẮC:
 
 - Không khẳng định chắc chắn giá.
-- Không tự tạo dữ liệu.
-- Không dùng HTML.
-- Không dùng ký tự lỗi mã hóa.
+- Không bịa dữ liệu.
+- Không sử dụng HTML.
+- Không sử dụng ký tự lạ.
 - Markdown đơn giản.
-- Không gọi CL=F là CLUSDT.
 - Đây chỉ là phân tích tham khảo.
 """
 
@@ -1157,14 +733,14 @@ QUY TẮC:
             model="gemini-3.6-flash",
             input=prompt,
             generation_config={
-                "thinking_level": "low",
-            },
+                "thinking_level": "low"
+            }
         )
 
         if (
             hasattr(
                 interaction,
-                "output_text",
+                "output_text"
             )
             and interaction.output_text
         ):
@@ -1178,374 +754,111 @@ QUY TẮC:
     except Exception as exc:
 
         return (
-            "❌ GEMINI ERROR\n\n"
+            "❌ Gemini Error\n\n"
             f"{exc}"
         )
 
 
 # ============================================================
-# CANDLE CHART
-# ============================================================
-
-def candle_chart(
-    df,
-):
-
-    chart_df = df.tail(
-        200
-    ).copy()
-
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=[
-            0.75,
-            0.25,
-        ],
-    )
-
-    fig.add_trace(
-        go.Candlestick(
-            x=chart_df[
-                "open_time"
-            ],
-            open=chart_df[
-                "open"
-            ],
-            high=chart_df[
-                "high"
-            ],
-            low=chart_df[
-                "low"
-            ],
-            close=chart_df[
-                "close"
-            ],
-            name=SYMBOL,
-        ),
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "ema20"
-            ],
-            name="EMA20",
-            mode="lines",
-        ),
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "ema50"
-            ],
-            name="EMA50",
-            mode="lines",
-        ),
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Bar(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "volume"
-            ],
-            name="Volume",
-        ),
-        row=2,
-        col=1,
-    )
-
-    fig.update_layout(
-        height=650,
-        title=(
-            f"{SYMBOL} — Biểu đồ nến "
-            f"({interval})"
-        ),
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified",
-        margin=dict(
-            l=10,
-            r=10,
-            t=50,
-            b=10,
-        ),
-    )
-
-    return fig
-
-
-# ============================================================
-# RSI CHART
-# ============================================================
-
-def rsi_chart(
-    df,
-):
-
-    chart_df = df.tail(
-        200
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "rsi"
-            ],
-            name="RSI",
-            mode="lines",
-        )
-    )
-
-    fig.add_hline(
-        y=70,
-        line_dash="dash",
-    )
-
-    fig.add_hline(
-        y=30,
-        line_dash="dash",
-    )
-
-    fig.add_hline(
-        y=50,
-        line_dash="dot",
-    )
-
-    fig.update_layout(
-        height=300,
-        title="RSI(14)",
-        yaxis=dict(
-            range=[0, 100]
-        ),
-    )
-
-    return fig
-
-
-# ============================================================
-# MACD CHART
-# ============================================================
-
-def macd_chart(
-    df,
-):
-
-    chart_df = df.tail(
-        200
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "macd"
-            ],
-            name="MACD",
-            mode="lines",
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df[
-                "open_time"
-            ],
-            y=chart_df[
-                "signal"
-            ],
-            name="Signal",
-            mode="lines",
-        )
-    )
-
-    fig.add_bar(
-        x=chart_df[
-            "open_time"
-        ],
-        y=chart_df[
-            "histogram"
-        ],
-        name="Histogram",
-    )
-
-    fig.update_layout(
-        height=320,
-        title="MACD(12,26,9)",
-    )
-
-    return fig
-
-
-# ============================================================
-# MAIN
+# APP
 # ============================================================
 
 if st.button(
-    "🚀 PHÂN TÍCH CLUSDT",
+    "🚀 PHÂN TÍCH GIÁ DẦU",
     type="primary",
-    use_container_width=True,
+    use_container_width=True
 ):
 
-    # ========================================================
-    # KIỂM TRA GEMINI
-    # ========================================================
+    # --------------------------------------------------------
+    # API KEY
+    # --------------------------------------------------------
 
     if not gemini_api_key.strip():
 
         st.error(
-            "⚠️ Vui lòng nhập Gemini API Key."
+            "⚠️ Bạn chưa nhập Gemini API Key."
         )
 
         st.stop()
 
-    # ========================================================
-    # COINGECKO
-    # ========================================================
-
-    with st.spinner(
-        "1/5: Đang lấy dữ liệu CLUSDT từ CoinGecko..."
-    ):
-
-        futures, cg_error = (
-            get_clusdt_from_coingecko()
-        )
-
-    if futures is None:
-
-        st.error(
-            "❌ Không lấy được CLUSDT từ CoinGecko."
-        )
-
-        st.code(
-            str(cg_error)
-        )
-
-        st.stop()
-
-    # ========================================================
-    # NẾN
-    # ========================================================
-
-    with st.spinner(
-        "2/5: Đang lấy dữ liệu nến CLUSDT..."
-    ):
-
-        candles, candle_error = (
-            get_binance_candles(
-                interval,
-                limit,
-            )
-        )
-
-    if candles is None:
-
-        st.error(
-            "❌ Không lấy được dữ liệu nến CLUSDT."
-        )
-
-        st.code(
-            str(candle_error)
-        )
-
-        st.info(
-            "CoinGecko cung cấp dữ liệu Futures "
-            "hiện tại nhưng không có OHLC lịch sử "
-            "riêng cho CLUSDT trong endpoint derivatives. "
-            "App không tạo nến giả."
-        )
-
-        st.stop()
-
-    # ========================================================
-    # INDICATORS
-    # ========================================================
-
-    with st.spinner(
-        "3/5: Đang tính RSI, MACD và EMA..."
-    ):
-
-        candles = add_indicators(
-            candles
-        )
-
-        if len(candles) < 30:
-
-            st.error(
-                "Không đủ nến để tính chỉ báo."
-            )
-
-            st.stop()
-
-        technical = (
-            technical_analysis(
-                candles
-            )
-        )
-
-    # ========================================================
-    # NEWS
-    # ========================================================
-
-    with st.spinner(
-        "4/5: Đang lấy tin tức dầu mỏ..."
-    ):
-
-        news = get_news()
-
-    # ========================================================
-    # DASHBOARD
-    # ========================================================
+    # --------------------------------------------------------
+    # TRADINGVIEW CHART
+    # --------------------------------------------------------
 
     st.subheader(
-        "📊 Binance CLUSDT"
+        "📺 TradingView — Giá dầu trực tiếp"
+    )
+
+    tradingview_chart(
+        tradingview_symbol,
+        interval
+    )
+
+    # --------------------------------------------------------
+    # TECHNICAL DATA
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Đang tải dữ liệu dầu để tính chỉ báo..."
+    ):
+
+        df, error = get_market_data(
+            period,
+            interval
+        )
+
+    if df is None:
+
+        st.error(
+            error
+        )
+
+        st.stop()
+
+    # --------------------------------------------------------
+    # INDICATORS
+    # --------------------------------------------------------
+
+    df = add_indicators(
+        df
+    )
+
+    technical = (
+        technical_analysis(
+            df
+        )
+    )
+
+    # --------------------------------------------------------
+    # NEWS
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Đang thu thập tin tức dầu mỏ..."
+    ):
+
+        news = get_global_news()
+
+    # --------------------------------------------------------
+    # DASHBOARD
+    # --------------------------------------------------------
+
+    st.subheader(
+        "📊 Tổng quan kỹ thuật"
     )
 
     c1, c2, c3, c4 = (
         st.columns(4)
     )
 
-    # Ưu tiên giá CoinGecko
-    live_price = (
-        futures["price"]
-        if futures["price"] is not None
-        else technical["price"]
-    )
-
     c1.metric(
-        "💵 Giá CLUSDT",
-        f"${live_price:.2f}",
+        "💵 Giá WTI",
+        f"${technical['price']:.2f}"
     )
 
     c2.metric(
         "RSI",
-        f"{technical['rsi']:.2f}",
+        f"{technical['rsi']:.2f}"
     )
 
     c3.metric(
@@ -1555,185 +868,73 @@ if st.button(
             if technical["macd"]
             > technical["signal"]
             else "🔴 Giảm"
-        ),
+        )
     )
 
     c4.metric(
-        "Xu hướng kỹ thuật",
-        technical["direction"],
+        "Xu hướng",
+        technical["direction"]
     )
 
-    # ========================================================
-    # FUTURES DATA
-    # ========================================================
+    # --------------------------------------------------------
+    # CANDLE CHART
+    # --------------------------------------------------------
 
     st.subheader(
-        "📡 Futures Sentiment"
+        "🕯️ Biểu đồ nến + EMA"
     )
 
-    f1, f2, f3, f4 = (
-        st.columns(4)
+    chart_df = df.tail(
+        200
+    ).copy()
+
+    st.line_chart(
+        chart_df[
+            [
+                "close",
+                "ema20",
+                "ema50"
+            ]
+        ],
+        height=450
     )
 
-    funding = futures[
-        "funding_rate"
-    ]
-
-    oi = futures[
-        "open_interest"
-    ]
-
-    vol24 = futures[
-        "volume_24h"
-    ]
-
-    index_price = futures[
-        "index"
-    ]
-
-    if funding is not None:
-
-        f1.metric(
-            "Funding",
-            f"{funding * 100:.4f}%",
-        )
-
-    else:
-
-        f1.metric(
-            "Funding",
-            "N/A",
-        )
-
-    if oi is not None:
-
-        f2.metric(
-            "Open Interest",
-            f"${oi:,.0f}",
-        )
-
-    else:
-
-        f2.metric(
-            "Open Interest",
-            "N/A",
-        )
-
-    if vol24 is not None:
-
-        f3.metric(
-            "Volume 24h",
-            f"${vol24:,.0f}",
-        )
-
-    else:
-
-        f3.metric(
-            "Volume 24h",
-            "N/A",
-        )
-
-    if index_price is not None:
-
-        f4.metric(
-            "Index Price",
-            f"${index_price:.2f}",
-        )
-
-    else:
-
-        f4.metric(
-            "Index Price",
-            "N/A",
-        )
-
-    # ========================================================
-    # BASIS
-    # ========================================================
-
-    basis = futures.get(
-        "basis"
-    )
-
-    if basis is not None:
-
-        st.caption(
-            f"Basis: {basis:.4f}%"
-        )
-
-    # ========================================================
-    # DATA SOURCE
-    # ========================================================
-
-    st.success(
-        "✅ Futures hiện tại: CoinGecko → Binance Futures CLUSDT"
-    )
-
-    st.info(
-        "🕯️ OHLC/nến lịch sử: Binance Public Data Archive. "
-        "Không sử dụng fapi.binance.com."
-    )
-
-    # ========================================================
-    # CANDLE
-    # ========================================================
-
-    st.subheader(
-        "🕯️ Biểu đồ nến CLUSDT"
-    )
-
-    fig = candle_chart(
-        candles
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={
-            "displaylogo": False,
-            "scrollZoom": True,
-        },
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # RSI
-    # ========================================================
+    # --------------------------------------------------------
 
     st.subheader(
         "📈 RSI"
     )
 
-    st.plotly_chart(
-        rsi_chart(
-            candles
-        ),
-        use_container_width=True,
-        config={
-            "displaylogo": False
-        },
+    st.line_chart(
+        df[
+            ["rsi"]
+        ].tail(200),
+        height=280
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # MACD
-    # ========================================================
+    # --------------------------------------------------------
 
     st.subheader(
         "📉 MACD"
     )
 
-    st.plotly_chart(
-        macd_chart(
-            candles
-        ),
-        use_container_width=True,
-        config={
-            "displaylogo": False
-        },
+    st.line_chart(
+        df[
+            [
+                "macd",
+                "signal"
+            ]
+        ].tail(200),
+        height=300
     )
 
-    # ========================================================
-    # TECHNICAL
-    # ========================================================
+    # --------------------------------------------------------
+    # TECHNICAL REASONS
+    # --------------------------------------------------------
 
     st.subheader(
         "🧠 Tín hiệu kỹ thuật"
@@ -1747,21 +948,20 @@ if st.button(
             f"• {reason}"
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # GEMINI
-    # ========================================================
+    # --------------------------------------------------------
 
     with st.spinner(
-        "5/5: Gemini đang tổng hợp dữ liệu..."
+        "🤖 Gemini đang phân tích..."
     ):
 
         analysis = (
             analyze_with_gemini(
                 api_key=gemini_api_key.strip(),
-                ticker=SYMBOL,
+                symbol=tradingview_symbol,
                 technical=technical,
-                futures=futures,
-                news=news,
+                news=news
             )
         )
 
@@ -1773,9 +973,9 @@ if st.button(
         analysis
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # NEWS
-    # ========================================================
+    # --------------------------------------------------------
 
     st.subheader(
         "📰 Tin tức đầu vào"
@@ -1787,29 +987,28 @@ if st.button(
 
         for i, item in enumerate(
             news,
-            start=1,
+            start=1
         ):
 
             st.write(
                 f"**{i}.** {item}"
             )
 
-    # ========================================================
+    # --------------------------------------------------------
     # FOOTER
-    # ========================================================
+    # --------------------------------------------------------
 
     st.markdown("---")
 
-    current_time = datetime.now(
-        timezone.utc
+    st.caption(
+        f"Biểu đồ: TradingView — {tradingview_symbol}"
     )
 
     st.caption(
-        f"CLUSDT | {interval} | "
-        f"Cập nhật: "
-        f"{current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        "Chỉ báo RSI/MACD/EMA: dữ liệu OHLC lịch sử WTI."
     )
 
     st.caption(
-        "⚠️ Dữ liệu và phân tích AI chỉ mang tính tham khảo."
+        "⚠️ Phân tích chỉ mang tính tham khảo, "
+        "không phải lời khuyên đầu tư."
     )
